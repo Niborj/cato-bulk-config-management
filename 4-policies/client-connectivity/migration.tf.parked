@@ -1,0 +1,24 @@
+# One-shot migration: adopt the 6 live Client Connectivity rules into
+# state. No sections exist live (0), so no section import blocks are
+# needed. `policy_enabled` is left unmanaged in main.tf (null default), so
+# the cato_client_connectivity_policy singleton toggle is not imported here
+# — see the module README's note that the toggle import only applies when
+# the module call sets policy_enabled to a non-null value. Safe to delete
+# this file after a successful `terraform apply` adopts the rules.
+#
+# BLOCKED (see README.md): this plan cannot currently be previewed/applied
+# because `terraform validate` fails on the missing cato_bulk_cc_move_rule
+# resource type. Written and ready for when the provider blocker clears.
+
+locals {
+  migrate_json   = jsondecode(file("../../config_data/all_cc_rules_and_sections.json"))
+  migrate_policy = local.migrate_json.data.policy.clientConnectivity.policy
+  migrate_rules  = { for rw in local.migrate_policy.rules : rw.rule.name => rw.rule.id }
+}
+
+import {
+  for_each = local.migrate_rules
+
+  to = module.cc_rules.cato_client_connectivity_rule.rules[each.key]
+  id = each.value
+}

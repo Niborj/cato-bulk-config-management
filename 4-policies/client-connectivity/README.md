@@ -1,0 +1,183 @@
+# Client Connectivity (CC)
+
+Manages Cato's Client Connectivity policy — rules controlling client connection posture requirements, plus sections and the account-level enable/disable toggle — as one bulk Terraform-managed unit sourced from a single JSON export. See "What this manages" below for the full picture.
+
+**Current status: blocked.** This folder can't be applied yet — see the next section for why, and check back once a provider release resolves it.
+
+## Blocked on provider release
+
+This family's bulk module (`terraform-cato-bulk-cc-rules`) declares two
+resource types that exist **only** on the cato provider's unmerged
+`feat/bulk-policy-families` branch, not in the published
+`1.5.0-prerelease.1` this repo otherwise pins:
+`cato_client_connectivity_policy` (the optional account-level toggle —
+present in the module even though this folder doesn't set
+`policy_enabled`, so Terraform still tries to parse it) and
+`cato_bulk_cc_move_rule` (the resource that orders sections/rules and
+publishes the policy). `terraform init` succeeds; `terraform validate`
+fails on both resource types. Verbatim output captured against this exact
+config:
+
+```
+$ terraform init -input=false
+Initializing the backend...
+Initializing modules...
+Initializing provider plugins...
+Terraform has been successfully initialized!
+
+$ terraform validate
+╷
+│ Error: Invalid resource type
+│
+│   on ../../../catonetworks/terraform-cato-bulk-cc-rules/main.tf line 88, in resource "cato_client_connectivity_policy" "policy":
+│   88: resource "cato_client_connectivity_policy" "policy" {
+│
+│ The provider catonetworks/cato does not support resource type
+│ "cato_client_connectivity_policy".
+╵
+╷
+│ Error: Invalid resource type
+│
+│   on ../../../catonetworks/terraform-cato-bulk-cc-rules/main.tf line 118, in resource "cato_bulk_cc_move_rule" "all_cc_rules":
+│  118: resource "cato_bulk_cc_move_rule" "all_cc_rules" {
+│
+│ The provider catonetworks/cato does not support resource type
+│ "cato_bulk_cc_move_rule". Did you mean "cato_bulk_if_move_rule"?
+╵
+```
+
+(Terraform's "Did you mean" suggestion — `cato_bulk_if_move_rule` is the
+Internet Firewall move resource, a coincidental name-similarity match, not
+a real alternative.) Nothing in this folder can be `apply`'d until a
+provider release merges that branch.
+
+## What this manages
+
+Cato's **Client Connectivity** policy — rules controlling client
+connection posture requirements (action, confidenceLevel, connectionOrigin,
+country, device, platform, source{user,usersGroup},
+sourceRange[].globalIpRange) plus sections and the account-level
+enable/disable toggle. This folder manages the entire Client Connectivity
+policy for the `<target-profile>` account as one bulk Terraform-managed unit,
+sourced from a single JSON export.
+
+**Live state:** the `<target-profile>` account currently has **0 sections and 6
+rules** (`Admin Access`, `Allow Browser Access`, `Enterprise Browser
+Access`, `Corporate Users - WAN and Internet`, `Corporate Users - Validate
+Token`, `HR Users - Crowdstrike Device Score`) in this policy family.
+`migration.tf` in this folder imports all 6 rules; there are no sections to
+import. `policy_enabled` is left unmanaged (`null` default) in `main.tf`,
+so the `cato_client_connectivity_policy` singleton toggle is also not
+imported — the module README documents that its import only applies when
+`policy_enabled` is set to a non-null value.
+
+## Module
+
+[`terraform-cato-bulk-cc-rules`](https://github.com/catonetworks/terraform-cato-bulk-cc-rules) —
+sourced from a **local path** (`../../../catonetworks/terraform-cato-bulk-cc-rules`)
+instead of the registry, since no registry release exists yet for this
+family. A commented-out registry source (`catonetworks/bulk-cc-rules/cato`,
+version `0.0.1`) is left in `main.tf` to swap in once published. Under the
+hood it creates `cato_client_connectivity_section`,
+`cato_client_connectivity_rule`, and a single `cato_bulk_cc_move_rule`
+resource that encodes rule/section ordering and publishes the policy — it
+is this last resource that is missing from `1.5.0-prerelease.1` (see
+"Blocked on provider release" above). Client Connectivity ships **disabled**
+on new tenants; this folder leaves the toggle unmanaged.
+
+**Export** runs from the **repo root**. **Import and Terraform commands**
+run from **this folder** (`3-policies/client-connectivity/`).
+
+## Authentication
+
+Credentials resolve in precedence order: explicit vars (`terraform.tfvars`) → `CATO_TOKEN`/`CATO_BASEURL` environment variables → a catocli profile (`cato_profile` var or `CATO_PROFILE` env) read from `~/.cato/credentials`. With a profile, no tfvars are needed at all:
+
+```bash
+CATO_PROFILE=<target-profile> terraform plan
+```
+
+Requires the published provider `2.0.0-prerelease.1` from the Terraform Registry. Verify which tenant a profile targets with `catocli configure show` before planning.
+
+## JSON schema
+
+`../../config_data/all_cc_rules_and_sections.json` follows:
+
+```
+data.policy.clientConnectivity.policy.sections[]           # each: { section_index, section_name }
+data.policy.clientConnectivity.policy.rules[]               # each: { audit, rule: { name, action, confidenceLevel, connectionOrigin, country, device, platform, source{user,usersGroup}, sourceRange[]{globalIpRange}, ... }, properties }
+data.policy.clientConnectivity.policy.rules_in_sections[]   # each: { index_in_section, section_name, rule_name }
+```
+
+`rules_in_sections` is what actually determines section/rule ordering.
+
+## Export (backup) workflow
+
+Run from the repo root:
+
+```bash
+CATO_PROFILE=<source-profile> catocli export cc_rules --json-filename all_cc_rules_and_sections.json --output-directory config_data
+```
+
+## Update workflow
+
+1. Edit the JSON directly (or re-export after a Cato UI change).
+2. `terraform plan` from this folder — currently blocked, see above.
+3. `terraform apply` once the plan matches intent — **blocked until the
+   provider ships the bulk-move resource**.
+4. Commit the updated JSON alongside the `.tf` changes.
+
+## Brownfield adoption
+
+<details>
+<summary>Option A (recommended) — native Terraform import blocks (migration.tf, already written)</summary>
+
+`migration.tf` in this folder imports the 6 live rules by name/id (no
+sections exist live, so no section import blocks; no policy-toggle import
+since `policy_enabled` isn't set):
+
+```hcl
+locals {
+  migrate_json   = jsondecode(file("../../config_data/all_cc_rules_and_sections.json"))
+  migrate_policy = local.migrate_json.data.policy.clientConnectivity.policy
+  migrate_rules  = { for rw in local.migrate_policy.rules : rw.rule.name => rw.rule.id }
+}
+
+import {
+  for_each = local.migrate_rules
+
+  to = module.cc_rules.cato_client_connectivity_rule.rules[each.key]
+  id = each.value
+}
+```
+
+`terraform plan` against this should show `6 to import, 1 to add, 0 to
+change, 0 to destroy` once the provider blocker clears — the "1 to add" is
+`cato_bulk_cc_move_rule.all_cc_rules`, which cannot be imported. Currently
+`terraform plan` cannot reach that point since `validate` fails first —
+see "Blocked on provider release".
+</details>
+
+<details>
+<summary>Option B — catocli import (imperative alternative)</summary>
+
+```bash
+catocli import cc_rules_to_tf config_data/all_cc_rules_and_sections.json \
+  --module-name module.cc_rules --auto-approve
+```
+
+Also blocked today for the same reason.
+</details>
+
+## Troubleshooting
+
+- `catocli ping` — verify API connectivity/credentials.
+- `catocli configure show` — confirm the active profile's account ID matches
+  `account_id_<source-profile>_dev` in `terraform.tfvars`.
+- If `terraform validate`/`init` ever **passes** against a future provider
+  version, re-run `terraform plan` against `migration.tf` to adopt the 6
+  live rules, then delete `migration.tf` and remove the "Blocked on
+  provider release" framing from this README. Consider at that point
+  whether `policy_enabled` should be set — Client Connectivity ships
+  disabled on new tenants.
+
+> **Verified against a local `feat/bulk-policy-families` provider build (2026-11-04):** `terraform plan` succeeds — 6 to import, 2 to add, 0 to change. The "blocked" status above applies only to the published 1.5.0-prerelease.1.

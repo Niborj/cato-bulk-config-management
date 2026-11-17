@@ -1,0 +1,104 @@
+# One-shot migration: adopt live objects into native resources and drop the old
+# catocli wrapper state. Safe to delete this file after the first successful
+# apply (import/removed blocks are no-ops once state matches).
+
+# The old modules/catocli-custom-applications wrapper tracked the 13 custom apps
+# as terraform_data anchors with a destroy-time provisioner that DELETES the live
+# apps. destroy = false forgets them from state without touching the tenant.
+removed {
+  from = module.custom_applications
+
+  lifecycle {
+    destroy = false
+  }
+}
+
+# NOTE: groups were split out to the 2-groups/ folder (cato_group is no longer
+# declared here), so their import lives in 2-groups/migration.tf -- not here.
+# A group import block in this folder would reference an undeclared groups local
+# and a nonexistent resource, so it is intentionally absent.
+
+# The global-IP-ranges singleton ignores the import id and hydrates the whole
+# account range set; any placeholder works.
+import {
+  to = cato_global_ip_ranges.this
+  id = "account"
+}
+
+# Custom apps import by their Cato id (config_data/custom_applications.json is
+# re-exported with ids included).
+import {
+  for_each = { for a in local.custom_applications : a.name => a }
+
+  to = cato_custom_application.this[each.key]
+  id = each.value.id
+}
+
+# The remaining dependency types all import by their plain Cato id, carried in
+# their config_data exports.
+import {
+  for_each = { for c in local.fqdn_containers : c.name => c }
+
+  to = cato_fqdn_container.this[each.key]
+  id = each.value.id
+}
+
+import {
+  for_each = { for c in local.ip_range_containers : c.name => c }
+
+  to = cato_ip_address_range_container.this[each.key]
+  id = each.value.id
+}
+
+import {
+  # Match the cato_mailing_list.this resource filter: system/default lists like
+  # "All Admins" (id -100) carry no address or admin and are NOT managed here, so
+  # they must be excluded from the import too (otherwise the import target has no
+  # configuration).
+  for_each = {
+    for m in local.mailing_lists : m.name => m
+    if length(try(m.address, [])) > 0 || length(try(m.admin, [])) > 0
+  }
+
+  to = cato_mailing_list.this[each.key]
+  id = each.value.id
+}
+
+import {
+  for_each = { for s in local.subscription_groups : s.name => s }
+
+  to = cato_subscription_group.this[each.key]
+  id = each.value.id
+}
+
+import {
+  # Match the cato_webhook.this resource filter: only webhooks whose export
+  # carries `body` are managed (a minimal `catocli export all` drops body), so
+  # only those are imported -- otherwise the import target has no configuration.
+  for_each = { for w in local.webhooks : w.name => w if try(w.body, null) != null }
+
+  to = cato_webhook.this[each.key]
+  id = each.value.id
+}
+
+import {
+  for_each = { for d in local.dhcp_relay_groups : d.name => d }
+
+  to = cato_dhcp_relay_group.this[each.key]
+  id = each.value.id
+}
+
+# Allocated IPs import by the IP ADDRESS (the resource's stable import key),
+# keyed by the source display name to match the for_each state address.
+# NOTE: only meaningful on the SOURCE tenant (or a tenant whose allocations
+# match the JSON) -- on a fresh target the allocations are CREATED, not imported.
+import {
+  for_each = { for a in local.allocated_ips : a.name => a }
+
+  to = cato_allocated_ip.this[each.key]
+  id = each.value.ip
+}
+
+# NOTE: app connectors + private apps were split out to ../2-app-connectors on
+# 2026-11-13 (deploy after 1-sites); their import blocks now live in
+# 2-app-connectors/migration.tf.

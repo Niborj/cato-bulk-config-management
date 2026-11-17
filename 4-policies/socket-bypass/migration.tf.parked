@@ -1,0 +1,28 @@
+# One-shot adoption of the live Socket Bypass rule(s).
+# Run `terraform plan` to preview, then `terraform apply`, then delete this
+# file — it's a one-time migration aid, not steady-state config.
+
+locals {
+  sb_migration_json     = jsondecode(file("../../config_data/all_sb_rules_and_sections.json"))
+  sb_migration_policy   = local.sb_migration_json.data.policy.socketBypass.policy
+  sb_migration_sections = { for s in local.sb_migration_policy.sections : s.section_name => s.section_id }
+  sb_migration_rules    = { for rw in local.sb_migration_policy.rules : rw.rule.name => rw.rule.id }
+}
+
+import {
+  for_each = local.sb_migration_sections
+  to       = module.sb_rules.cato_socket_bypass_section.sections[each.key]
+  id       = each.value
+}
+
+import {
+  for_each = local.sb_migration_rules
+  to       = module.sb_rules.cato_socket_bypass_rule.rules[each.key]
+  id       = each.value
+}
+
+# cato_bulk_sb_move_rule is plan-time orchestration — it republishes the
+# whole policy on every apply and has no persisted object of its own, so it
+# is never imported. Same for the optional cato_socket_bypass_policy
+# enable/disable toggle: a tenant-wide singleton with no name/for_each to key
+# an import block on (left unmanaged here; policy_enabled defaults to null).

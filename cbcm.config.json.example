@@ -1,0 +1,5 @@
+{
+  "_comment": "Optional source-tenant guard for the scripts/ tooling. Copy to cbcm.config.json and fill in YOUR protected tenant(s). Defaults are EMPTY -- nothing is protected until you declare it here (or via the CBCM_PROTECTED_ACCOUNTS / CBCM_PROTECTED_PROFILES env vars, which merge with this file). A protected account/profile can never be purged or SCIM-pushed, and bulk_apply requires --source-tenant-apply to apply to it.",
+  "protected_accounts": ["12345"],
+  "protected_profiles": ["prod", "prod-readonly"]
+}

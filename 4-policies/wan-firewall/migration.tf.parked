@@ -1,0 +1,48 @@
+# One-shot brownfield RE-adoption of the live WAN Firewall policy,
+# including sub-policies and their rules.
+#
+# PRECONDITION (manual, the operator): retire this folder's hollow pre-rebuild
+# state first, or these import blocks error with "resource already managed":
+#
+#   mv terraform.tfstate         terraform.tfstate.pre-readoption-$(date +%Y%m%d).bak
+#   mv terraform.tfstate.backup  terraform.tfstate.backup.pre-readoption-$(date +%Y%m%d).bak
+#
+# Clean plan: "N to import, 1 to add (the cato_bulk_wf_move_rule ordering
+# resource), 0 to change, 0 to destroy." Apply, then delete this file.
+
+locals {
+  wf_migration = jsondecode(file("../../config_data/all_wf_rules_and_sections.json")).data.policy.wanFirewall.policy
+
+  # Main-policy vs sub-policy split. A section/rule carries sub_policy_name only
+  # when it lives INSIDE a sub-policy. The module manages sub-sections via an
+  # output only (there is no cato_wf_section resource for them), so ONLY main
+  # sections are imported; sub-policy rules import as cato_wf_rule.sub_rules.
+  wf_main_sections = { for s in local.wf_migration.sections : s.section_name => s if try(s.sub_policy_name, null) == null }
+  wf_main_rules    = { for r in local.wf_migration.rules : r.rule.name => r.rule if try(r.sub_policy_name, null) == null }
+  wf_sub_policies  = { for sp in try(local.wf_migration.sub_policies, []) : sp.sub_policy_name => sp }
+  wf_sub_rules     = { for r in local.wf_migration.rules : "${r.sub_policy_name}::${r.rule.name}" => r.rule if try(r.sub_policy_name, null) != null }
+}
+
+import {
+  for_each = local.wf_main_sections
+  to       = module.wf_rules.cato_wf_section.sections[each.key]
+  id       = each.value.section_id
+}
+
+import {
+  for_each = local.wf_main_rules
+  to       = module.wf_rules.cato_wf_rule.rules[each.key]
+  id       = each.value.id
+}
+
+import {
+  for_each = local.wf_sub_policies
+  to       = module.wf_rules.cato_wf_sub_policy.sub_policies[each.key]
+  id       = each.value.sub_policy_id
+}
+
+import {
+  for_each = local.wf_sub_rules
+  to       = module.wf_rules.cato_wf_rule.sub_rules[each.key]
+  id       = each.value.id
+}

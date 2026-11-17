@@ -1,0 +1,13 @@
+# One-shot migration: adopt the live groups (handed over from 1-dependencies,
+# see 1-dependencies/migration-groups-handover.tf) into this folder's native
+# state. Safe to delete this file after the first successful apply (import
+# blocks are no-ops once state matches).
+
+# Brownfield adoption: groups import by their Cato id (already present in
+# config_data/groups.json).
+import {
+  for_each = { for g in local.groups : g.name => g }
+
+  to = cato_group.this[each.key]
+  id = each.value.id
+}

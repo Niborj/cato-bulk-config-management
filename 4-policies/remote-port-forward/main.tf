@@ -1,0 +1,23 @@
+provider "cato" {
+  # baseurl    = "https://api.catonetworks.com/api/v1/graphql2"
+  # token      = var.cato_token
+  # account_id = var.account_id
+  profile = var.cato_profile
+}
+
+module "rpf_rules" {
+  # Local clone while the module is pre-release; restore the registry pin
+  # below once it's published.
+  source  = "catonetworks/bulk-rpf-rules/cato"
+  version = "0.0.1"
+  # Local dev override (uncomment to use a local module clone):
+  # source = "../../../../catonetworks/terraform-cato-bulk-rpf-rules"
+  # version = "0.0.1"
+
+  rpf_rules_json_file_path = var.rpf_rules_json_file_path
+  allow_empty_policy       = true
+  # Dynamic allocated-IP resolution by (description, popLocation) -- see
+  # allocated_ip_resolution.tf. Replaces the scripts/remap_allocated_ips.py
+  # staging-copy flow for this family.
+  allocated_ip_id_map = local.rpf_allocated_ip_id_map
+}

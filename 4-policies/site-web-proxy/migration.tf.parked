@@ -1,0 +1,30 @@
+# One-shot adoption of the live Site Web Proxy sections AND rules.
+# cato_site_web_proxy_rule ships with ImportState in the provider's
+# feat/bulk-policy-families branch (absent from published 1.5.0-prerelease.1 —
+# this folder requires that branch's build). Run `terraform plan` to preview,
+# then `terraform apply`, then delete this file.
+
+locals {
+  swp_migration_json     = jsondecode(file("../../config_data/all_swp_rules_and_sections.json"))
+  swp_migration_policy   = local.swp_migration_json.data.policy.siteWebProxy.policy
+  swp_migration_sections = { for s in local.swp_migration_policy.sections : s.section_name => s.section_id }
+  swp_migration_rules    = { for r in local.swp_migration_policy.rules : r.rule.name => r.rule.id }
+}
+
+import {
+  for_each = local.swp_migration_sections
+  to       = module.swp_rules.cato_site_web_proxy_section.sections[each.key]
+  id       = each.value
+}
+
+import {
+  for_each = local.swp_migration_rules
+  to       = module.swp_rules.cato_site_web_proxy_rule.rules[each.key]
+  id       = each.value
+}
+
+# cato_bulk_swp_move_rule is plan-time orchestration — it republishes the
+# whole policy on every apply and has no persisted object of its own, so it
+# is never imported. Same for the optional cato_site_web_proxy_policy
+# enable/disable toggle: a tenant-wide singleton with no name/for_each to key
+# an import block on (left unmanaged here; policy_enabled defaults to null).

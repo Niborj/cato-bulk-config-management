@@ -1,0 +1,12 @@
+# Remote state backend — scaffold only. See docs/remote-state-migration.md for the
+# full runbook (bucket creation, per-folder keys, migration commands, 2-* state audit).
+# To activate: copy to backend.tf, fill in, then: terraform init -migrate-state
+#
+# terraform {
+#   backend "s3" {
+#     bucket       = "<state-bucket>"
+#     key          = "<target-profile>/2-policies/tls-inspection.tfstate"
+#     region       = "us-east-1"
+#     use_lockfile = true   # Terraform >= 1.10
+#   }
+# }

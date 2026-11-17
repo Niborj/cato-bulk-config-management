@@ -1,0 +1,79 @@
+name: Terraform validate
+
+# Static checks only -- no credentials, no plan/apply against any tenant.
+# Runs `terraform fmt -check`, per-folder `terraform init -backend=false` +
+# `terraform validate`, the config_data/ linter against the shipped fixtures,
+# and the tenant-data scrub check. All modules resolve from the public
+# Terraform Registry, so every folder hard-validates.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive
+
+  scrub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: scrub_check (no tenant data / PII may leak into this public repo)
+        run: bash scripts/scrub_check
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: config_data validator (against shipped fixtures)
+        run: python3 scripts/validate_config_data.py --config-dir config_data/fixtures
+
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        folder:
+          - 0-dependencies
+          - 1-sites
+          - 2-app-connectors
+          - 3-groups
+          - 4-policies/always-on
+          - 4-policies/anti-malware-file-hash
+          - 4-policies/app-tenant-restriction
+          - 4-policies/application-control
+          - 4-policies/client-connectivity
+          - 4-policies/dynamic-ip-allocation
+          - 4-policies/internet-firewall
+          - 4-policies/lan-firewall
+          - 4-policies/private-access
+          - 4-policies/remote-port-forward
+          - 4-policies/sdp-static-ip-allocation
+          - 4-policies/site-web-proxy
+          - 4-policies/socket-bypass
+          - 4-policies/split-tunnel
+          - 4-policies/terminal-server
+          - 4-policies/tls-inspection
+          - 4-policies/wan-firewall
+          - 4-policies/wan-network
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: terraform init
+        working-directory: ${{ matrix.folder }}
+        # -upgrade so the pinned registry provider + modules install fresh in CI
+        run: terraform init -backend=false -input=false -upgrade
+      - name: terraform validate
+        working-directory: ${{ matrix.folder }}
+        run: terraform validate

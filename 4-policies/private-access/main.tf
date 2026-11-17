@@ -1,0 +1,31 @@
+# BLOCKED: this family's bulk-move resource ships in the provider's
+# feat/bulk-policy-families branch — init/validate fails against published
+# 1.5.0-prerelease.1 until the next provider release.
+#
+# `cato_private_access_rule_bulk` (declared by module.pa_rules) is not a
+# known resource type in 1.5.0-prerelease.1. See README.md "Blocked on
+# provider release" for the exact `terraform validate` error captured
+# against this config.
+
+provider "cato" {
+  # baseurl    = "https://api.catonetworks.com/api/v1/graphql2"
+  # token      = var.cato_token
+  # account_id = var.account_id
+  profile = var.cato_profile
+}
+
+module "pa_rules" {
+  # Local path while the module's resources (cato_private_access_rule_bulk)
+  # only exist on the provider's unmerged feat/bulk-policy-families branch.
+  source  = "catonetworks/bulk-private-access/cato"
+  version = "0.0.1"
+  # Local dev override (uncomment to use a local module clone):
+  # source = "../../../../catonetworks/terraform-cato-bulk-private-access"
+
+  # Switch to the registry source once a provider release ships the
+  # cato_private_access_rule_bulk resource:
+  # version = "0.0.1"
+
+  pa_rules_json_file_path = "${var.config_data_dir}/all_pa_rules_and_sections.json"
+  allow_empty_policy      = true
+}

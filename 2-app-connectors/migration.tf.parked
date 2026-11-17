@@ -1,0 +1,21 @@
+# Brownfield adoption of app connectors + private apps (split out of
+# 0-dependencies on 2026-11-13). Import each by the `id` field in its JSON.
+# The import for_each locals (local.app_connectors, local.private_applications)
+# are defined in bulk_app_connectors.tf / bulk_private_apps.tf in this folder.
+# On a fresh TARGET tenant the allocations are CREATED, not imported (empty JSON
+# or new objects). A clean adoption plan reads "N to import, 0 to add, 0 to
+# change, 0 to destroy"; any "change" means the JSON is stale -- re-export.
+# Deletable after the first apply.
+import {
+  for_each = { for c in local.app_connectors : c.name => c }
+
+  to = cato_app_connector.this[each.key]
+  id = each.value.id
+}
+
+import {
+  for_each = { for p in local.private_applications : p.name => p }
+
+  to = cato_private_app.this[each.key]
+  id = each.value.id
+}

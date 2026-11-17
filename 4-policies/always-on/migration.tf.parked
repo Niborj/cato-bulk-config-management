@@ -1,0 +1,32 @@
+# One-shot migration: adopt the live Always-On policy into state -- both rules
+# AND sections. Each for_each is keyed by object NAME (matching the module's
+# own for_each), so these blocks are generic: they import whatever the
+# config_data export contains and are no-ops (empty for_each) when a type has
+# zero objects. Safe to delete this file after a successful `terraform apply`
+# adopts everything (a clean adoption plans as "N to import, 0 to add,
+# 0 to change, 0 to destroy").
+
+locals {
+  migrate_json   = jsondecode(file("../../config_data/all_ao_rules_and_sections.json"))
+  migrate_policy = local.migrate_json.data.policy.ztnaAlwaysOn.policy
+  migrate_rules  = { for rw in local.migrate_policy.rules : rw.rule.name => rw.rule.id }
+  # Sections use the export's flat shape ({section_name, section_id}); key by
+  # name to match module.ao_rules.cato_always_on_section.sections["<name>"].
+  migrate_sections = {
+    for s in local.migrate_policy.sections : s.section_name => s.section_id
+  }
+}
+
+import {
+  for_each = local.migrate_rules
+
+  to = module.ao_rules.cato_always_on_rule.rules[each.key]
+  id = each.value
+}
+
+import {
+  for_each = local.migrate_sections
+
+  to = module.ao_rules.cato_always_on_section.sections[each.key]
+  id = each.value
+}

@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+#
+# scrub_check -- fail if any tenant-specific identifier leaked into the tree.
+#
+# This package is meant to be tenant-agnostic and public. Run this before
+# publishing (and in CI) to prove no real account id, profile name, bucket, or
+# org/PII string remains. Exits non-zero (and prints every hit) if anything
+# matches; exits 0 when the tree is clean.
+#
+# Usage:  scripts/scrub_check            # scan the repo root
+#         scripts/scrub_check <dir>      # scan a specific directory
+set -u
+
+ROOT="${1:-$(cd "$(dirname "$0")/.." && pwd)}"
+SELF="$(basename "$0")"
+
+# Patterns that must NOT appear anywhere in the tree.
+#  - specific account ids (word-boundaried so unrelated numbers don't match)
+#  - profile / tenant / org / bucket / PII strings
+PATTERNS=(
+  '\b(15412|23412|11360|11361|19608|24425)\b'
+  'refarch'
+  'badev'
+  'GoldenLab'
+  'AnalystDemo'
+  'getsase'
+  'cato-refarch-tfstate'
+  'sp-24425'
+  'Brian'
+  '104\.26\.6\.112'
+  'democatonetworks'
+)
+
+# Directories / files that are never scanned.
+EXCLUDES=(
+  --exclude-dir=.git
+  --exclude-dir=.terraform
+  --exclude-dir=__pycache__
+  --exclude="$SELF"
+  --exclude='*.tfstate'
+  --exclude='*.tfstate.*'
+)
+
+status=0
+for pat in "${PATTERNS[@]}"; do
+  # -I skips binary files; -E extended regex; -n line numbers; -i case-insensitive
+  # (so REFARCH / Refarch leak the same as refarch).
+  if hits="$(grep -rInEi "${EXCLUDES[@]}" -- "$pat" "$ROOT" 2>/dev/null)"; then
+    echo "FAIL: pattern '/$pat/' found:"
+    echo "$hits"
+    echo
+    status=1
+  fi
+done
+
+# Heuristic: flag any IPv4 that is NOT a documentation (RFC5737), private
+# (RFC1918), CGNAT, loopback/link-local/metadata, or the workshop 1.2.3.x
+# example range -- a real public IP shouldn't appear in a tenant-agnostic package.
+ip_suspects="$(grep -rhoEI "${EXCLUDES[@]}" '([0-9]{1,3}\.){3}[0-9]{1,3}' "$ROOT" 2>/dev/null \
+  | sort -u \
+  | grep -vE '^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|127\.|169\.254\.|100\.64\.|0\.0\.0\.0|255\.|1\.2\.3\.)' || true)"
+if [ -n "$ip_suspects" ]; then
+  echo "FAIL: public IP(s) outside documentation/private ranges:"
+  echo "$ip_suspects"
+  echo "  (use RFC5737 doc IPs -- 192.0.2.x / 198.51.100.x / 203.0.113.x -- instead)"
+  echo
+  status=1
+fi
+
+if [ "$status" -eq 0 ]; then
+  echo "scrub_check: PASS -- no tenant-specific identifiers found under $ROOT"
+else
+  echo "scrub_check: FAIL -- scrub the hits above before publishing."
+fi
+exit "$status"

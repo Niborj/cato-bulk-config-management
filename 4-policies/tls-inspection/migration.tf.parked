@@ -1,0 +1,27 @@
+# One-shot brownfield adoption of the live TLS Inspection policy.
+#
+# No stale state here (this folder has never been applied — TLS was
+# greenfield until the tenant gained live rules). `terraform plan` should
+# read: 11 to import, 1 to add (the cato_bulk_tls_move_rule ordering
+# resource), 0 to change, 0 to destroy. The export lists no explicit
+# sections (rules live in the tenant's implicit "Default Section"), so the
+# sections import is a no-op over an empty set. Apply, then delete this
+# file.
+
+locals {
+  tls_migration = jsondecode(file("../../config_data/all_tls_rules_and_sections.json")).data.policy.tlsInspect.policy
+}
+
+import {
+  for_each = { for s in local.tls_migration.sections : s.section_name => s }
+
+  to = module.tls_rules.cato_tls_section.sections[each.key]
+  id = each.value.section_id
+}
+
+import {
+  for_each = { for r in local.tls_migration.rules : r.rule.name => r.rule }
+
+  to = module.tls_rules.cato_tls_rule.rules[each.key]
+  id = each.value.id
+}

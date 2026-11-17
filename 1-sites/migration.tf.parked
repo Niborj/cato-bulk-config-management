@@ -1,0 +1,164 @@
+# One-shot brownfield adoption for everything 0-sites manages, fully declarative
+# (native import blocks — no imperative terraform import runs needed). Preview
+# with `terraform plan` (expect only "to import"), adopt with
+# `terraform apply -parallelism=1`, then delete this file.
+
+# ---------------------------------------------------------------------------
+# Static hosts: composite "<site-id>/<host-id>" import IDs.
+# ---------------------------------------------------------------------------
+import {
+  for_each = { for h in local.static_hosts : "${h.site_name}:${h.name}" => h }
+
+  to = cato_static_host.this[each.key]
+  id = "${each.value.site_id}/${each.value.id}"
+}
+
+# ---------------------------------------------------------------------------
+# Socket-site stack, driven by the same socket_sites.json the module reads.
+# Keys match the bulk module's own name/index-based for_each addressing.
+# LAG members export with id == null, so their composite import ID is computed
+# as "<site_id>:<interface_index>". The site's native range is part of
+# cato_socket_site itself and is never imported separately.
+# ---------------------------------------------------------------------------
+locals {
+  migration_sites = jsondecode(file("../config_data/socket_sites.json")).sites
+
+  migration_wan = merge([
+    for s in local.migration_sites : {
+      for w in try(s.wan_interfaces, []) :
+      "${s.name}|${w.index}" => {
+        site_name = s.name
+        key       = w.index
+        import_id = w.id
+        is_lte    = w.index == "LTE"
+      }
+    }
+  ]...)
+
+  migration_lan_regular = merge([
+    for s in local.migration_sites : {
+      for l in try(s.lan_interfaces, []) :
+      "${s.name}|${l.index}" => {
+        site_name = s.name
+        key       = l.index
+        import_id = l.id
+      } if !try(l.default_lan, false) && try(l.dest_type, "") != "LAN_LAG_MEMBER" && try(l.id, null) != null && try(l.id, "") != ""
+    }
+  ]...)
+
+  migration_lag_members = merge([
+    for s in local.migration_sites : {
+      for l in try(s.lan_interfaces, []) :
+      "${s.name}|${l.index}" => {
+        site_name = s.name
+        key       = l.index
+        import_id = "${s.id}:${l.index}" # lan.id is null for LAG members -- compute it
+      } if try(l.dest_type, "") == "LAN_LAG_MEMBER"
+    }
+  ]...)
+
+  # Non-native ranges land in the child module's default_interface_ranges,
+  # keyed "<name>_<idx>" over the site's flattened non-native range list.
+  migration_default_ranges = merge([
+    for s in local.migration_sites : {
+      for idx, nr in flatten([
+        for l in try(s.lan_interfaces, []) : [
+          for nr in try(l.network_ranges, []) : nr
+          if !try(nr.native_range, false)
+        ]
+      ]) :
+      "${s.name}|${nr.name}_${idx}" => {
+        site_name = s.name
+        key       = "${nr.name}_${idx}"
+        import_id = nr.id
+      }
+    }
+  ]...)
+
+  migration_ssids = merge([
+    for s in local.migration_sites : {
+      for ssid in try(s.wifi_ssids, []) :
+      "${s.name}|${ssid.name}" => {
+        site_name = s.name
+        key       = ssid.name
+        import_id = ssid.id
+      }
+    }
+  ]...)
+}
+
+import {
+  for_each = { for s in local.migration_sites : s.name => s }
+
+  to = module.sites.module.socket-site[each.key].cato_socket_site.site
+  id = each.value.id
+}
+
+import {
+  for_each = { for k, v in local.migration_wan : k => v if !v.is_lte }
+
+  to = module.sites.module.socket-site[each.value.site_name].cato_wan_interface.wan[each.value.key]
+  id = each.value.import_id
+}
+
+import {
+  for_each = { for k, v in local.migration_wan : k => v if v.is_lte }
+
+  to = module.sites.module.socket-site[each.value.site_name].cato_wan_interface.wan_lte[each.value.key]
+  id = each.value.import_id
+}
+
+import {
+  for_each = local.migration_lan_regular
+
+  to = module.sites.module.socket-site[each.value.site_name].module.lan_interfaces[each.value.key].cato_lan_interface.interface[each.value.key]
+  id = each.value.import_id
+}
+
+import {
+  for_each = local.migration_lag_members
+
+  to = module.sites.module.socket-site[each.value.site_name].cato_lan_interface_lag_member.lag_lan_members[each.value.key]
+  id = each.value.import_id
+}
+
+import {
+  for_each = local.migration_default_ranges
+
+  to = module.sites.module.socket-site[each.value.site_name].cato_network_range.default_interface_ranges[each.value.key]
+  id = each.value.import_id
+}
+
+import {
+  for_each = local.migration_ssids
+
+  to = module.sites.module.socket-site[each.value.site_name].cato_wifi_ssid.this[each.value.key]
+  id = each.value.import_id
+}
+
+# ---- Placeholder (non-socket) sites: vsocket / ipsec / interconnect ---------
+# 0-sites provisions these as shell sites (site + native range only) in their own
+# per-type .tf files, keyed by site NAME. Without these import blocks they'd be
+# planned as CREATE and fail "name already exists" on a target that already has
+# them. Each imports by the Cato site id from its config_data export.
+
+import {
+  for_each = { for s in local.vsocket_sites_data : s.name => s }
+
+  to = cato_socket_site.vsocket[each.key]
+  id = each.value.id
+}
+
+import {
+  for_each = { for s in local.ipsec_sites_data : s.name => s }
+
+  to = cato_ipsec_site.this[each.key]
+  id = each.value.id
+}
+
+import {
+  for_each = { for s in local.interconnect_sites_data : s.name => s }
+
+  to = cato_cloud_interconnect_site.this[each.key]
+  id = each.value.id
+}

@@ -1,0 +1,18 @@
+# Option A — explicit credentials (previous behavior):
+cato_token = "REPLACE_WITH_CATO_API_TOKEN"
+account_id = "REPLACE_WITH_CATO_ACCOUNT_ID"
+
+# Option B — catocli profile authentication (requires provider >= 1.5.0-prerelease.3).
+# Leave the token/account lines above unset/commented and let the provider read
+# ~/.cato/credentials. Alternatively skip tfvars entirely:  CATO_PROFILE=<profile> terraform plan
+# cato_profile = "<target-profile>"
+
+# Webhook auth secrets (keyed by webhook name, matching config_data/webhooks.json).
+# The webhook export is credential-free, so secrets are supplied here (keep the
+# real tfvars gitignored). NO_AUTH webhooks need NO entry; provide exactly one of
+# basic / bearer / custom per entry, matching the webhook's authType.
+# webhook_secrets = {
+#   "ServiceNow - Create" = { custom = { name = "x-sn-apikey", value = "REPLACE_WITH_SECRET" } }
+#   "ServiceNow - Update" = { custom = { name = "x-sn-apikey", value = "REPLACE_WITH_SECRET" } }
+#   # "AWS EventBridge" / "Slack SOC IR - Create" are NO_AUTH -> no entry needed.
+# }

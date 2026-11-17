@@ -1,0 +1,64 @@
+# One-shot brownfield adoption of the live LAN Firewall (socketLan) policy.
+# Run `terraform plan` to preview (expect N to import, plus the always-created
+# terraform_data.guard_empty_policy and cato_bulk_lf_move_rule showing as
+# "to add" since neither is importable), then `terraform apply`, then delete
+# this file — it's a one-time migration aid, not steady-state config.
+
+locals {
+  lanfw = jsondecode(file("../../config_data/all_lan_fw_rules_and_sections.json")).data.policy.socketLan.policy
+
+  lanfw_main_sections = {
+    for s in local.lanfw.sections : s.section_name => s
+    if try(s.sub_policy_name, null) == null
+  }
+  lanfw_sub_sections = {
+    for s in local.lanfw.sections : "${s.sub_policy_name}::${s.section_name}" => s
+    if try(s.sub_policy_name, null) != null
+  }
+  lanfw_sub_policies = {
+    for sp in try(local.lanfw.sub_policies, []) : sp.sub_policy_name => sp
+  }
+  lanfw_network_rules = {
+    for nr in local.lanfw.network_rules : nr.rule.name => nr.rule
+  }
+  lanfw_firewall_rules = merge([
+    for nr in local.lanfw.network_rules : {
+      for fw in try(nr.firewall_rules, []) :
+      "${nr.rule.name}::${fw.rule.name}" => fw.rule
+    }
+  ]...)
+}
+
+import {
+  for_each = local.lanfw_main_sections
+  to       = module.lan_fw_rules.cato_socket_lan_section.sections[each.key]
+  id       = each.value.section_id
+}
+
+import {
+  for_each = local.lanfw_sub_sections
+  to       = module.lan_fw_rules.cato_socket_lan_section.sub_sections[each.key]
+  id       = each.value.section_id
+}
+
+import {
+  for_each = local.lanfw_sub_policies
+  to       = module.lan_fw_rules.cato_lf_sub_policy.sub_policies[each.key]
+  id       = each.value.sub_policy_id
+}
+
+import {
+  for_each = local.lanfw_network_rules
+  to       = module.lan_fw_rules.cato_socket_lan_network_rule.network_rules[each.key]
+  id       = each.value.id
+}
+
+import {
+  for_each = local.lanfw_firewall_rules
+  to       = module.lan_fw_rules.cato_socket_lan_firewall_rule.firewall_rules[each.key]
+  id       = each.value.id
+}
+
+# cato_bulk_lf_move_rule.all_lan_fw_rules is plan-time ordering orchestration
+# — it has no live object of its own, so it is never imported; it's created
+# on the first apply after the resources above are adopted.

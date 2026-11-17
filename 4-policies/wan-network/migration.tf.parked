@@ -1,0 +1,29 @@
+# One-shot brownfield RE-adoption of the live WAN Network (routing) policy.
+#
+# PRECONDITION (manual, the operator): retire this folder's hollow pre-rebuild
+# state first, or these import blocks error with "resource already managed":
+#
+#   mv terraform.tfstate         terraform.tfstate.pre-readoption-$(date +%Y%m%d).bak
+#   mv terraform.tfstate.backup  terraform.tfstate.backup.pre-readoption-$(date +%Y%m%d).bak
+#
+# Then `terraform plan` should read: 26 to import, 1 to add (the
+# cato_bulk_wnw_move_rule ordering resource), 0 to change, 0 to destroy.
+# Apply, then delete this file.
+
+locals {
+  wnw_migration = jsondecode(file("../../config_data/all_wnw_rules_and_sections.json")).data.policy.wanNetwork.policy
+}
+
+import {
+  for_each = { for s in local.wnw_migration.sections : s.section_name => s }
+
+  to = module.wnw_rules.cato_wnw_section.sections[each.key]
+  id = each.value.section_id
+}
+
+import {
+  for_each = { for r in local.wnw_migration.rules : r.rule.name => r.rule }
+
+  to = module.wnw_rules.cato_wnw_rule.rules[each.key]
+  id = each.value.id
+}

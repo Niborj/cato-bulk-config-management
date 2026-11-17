@@ -1,0 +1,26 @@
+# One-shot brownfield adoption of the live Application Control policy.
+# Run `terraform plan` to preview, then `terraform apply`, then delete this
+# file — it's a one-time migration aid, not steady-state config.
+
+locals {
+  apc = jsondecode(file("../../config_data/all_apc_rules_and_sections.json")).data.policy.applicationControl.policy
+
+  apc_sections = { for s in local.apc.sections : s.section_name => s }
+  apc_rules    = { for r in local.apc.rules : r.rule.name => r.rule }
+}
+
+import {
+  for_each = local.apc_sections
+  to       = module.apc_rules.cato_application_control_section.sections[each.key]
+  id       = each.value.section_id
+}
+
+import {
+  for_each = local.apc_rules
+  to       = module.apc_rules.cato_application_control_rule.rules[each.key]
+  id       = each.value.id
+}
+
+# cato_bulk_apc_move_rule.all_apc_rules is plan-time ordering orchestration —
+# it has no live object of its own, so it is never imported; it's created on
+# the first apply after the resources above are adopted.
