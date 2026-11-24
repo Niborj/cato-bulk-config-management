@@ -20,36 +20,37 @@ it's shown only once. Note each account number too: it's the number after
 ## 2. Run the check
 
 Open Terminal (you need git and Python 3). Replace the words in CAPITALS with
-your own values, keep the single quotes around each key, and paste each block in turn.
+your own values, keep the single quotes around each key, and paste each block whole: it runs as one.
 
 Once per computer:
 
 ```bash
-git clone https://github.com/catonetworks/cato-bulk-config-management.git
-cd cato-bulk-config-management
-python3 -m venv .venv && .venv/bin/pip install catocli
+git clone https://github.com/catonetworks/cato-bulk-config-management.git &&
+cd cato-bulk-config-management &&
+python3 -m venv .venv && .venv/bin/pip install catocli &&
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
 Once per pair of accounts:
 
 ```bash
-catocli configure set --profile source --cato-token 'CURRENT_KEY' --account-id CURRENT_NUMBER
+catocli configure set --profile source --cato-token 'CURRENT_KEY' --account-id CURRENT_NUMBER &&
 catocli configure set --profile target --cato-token 'NEW_KEY' --account-id NEW_NUMBER
 ```
 
 Export the current account (read-only, a few minutes):
 
 ```bash
-CATO_PROFILE=source catocli export all --strip-ids --no-account-suffix --output-directory config_data --archive-directory config_data_archive
-CATO_PROFILE=source catocli export static_hosts --site-type all -f json --output-directory config_data
+export CATO_PROFILE=source &&
+catocli export all --strip-ids --no-account-suffix --output-directory config_data &&
+catocli export static_hosts --site-type all -f json --output-directory config_data &&
 python3 scripts/export_webhooks.py --profile source --config-dir config_data
 ```
 
 The check: the one to remember, and to run again after every fix:
 
 ```bash
-python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf --customer "CUSTOMER NAME"
+python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf
 ```
 
 ## 3. What to do next

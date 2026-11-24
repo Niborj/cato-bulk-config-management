@@ -477,6 +477,8 @@ width:230px;max-height:calc(100vh - 48px);overflow:auto;font-size:13px;line-heig
 .flabel{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--moss);padding:8px 14px 0}
 .cmd button{position:absolute;top:7px;right:8px;font:600 12px Inter,sans-serif;color:var(--pine);background:var(--hl);border:0;border-radius:6px;padding:4px 10px;cursor:pointer}
 .snote{font-size:13px;color:var(--mid);margin-top:4px}
+.copynote{font-size:13px;background:#fff2c6;color:#5c4500;border-radius:8px;padding:8px 12px}
+.copynote code{font:12px ui-monospace,Menlo,Consolas,monospace}
 .sb code{font:12.5px ui-monospace,Menlo,Consolas,monospace;background:var(--pale);padding:1px 5px;border-radius:4px}
 footer{margin-top:48px;padding-top:16px;border-top:1px solid #e3e3e3;display:flex;gap:18px;align-items:center;font-size:12px;color:var(--mid)}
 footer img{height:20px;width:auto;flex:none}
@@ -829,7 +831,10 @@ def render_runbook_html(phases, item_nums):
            '<p>For the engineers who run the migration. Every command is set for these two accounts. Only the words in '
            'CAPITALS are yours to fill in. Steps that say <i>Before this step</i> point at the items in the action plan '
            'that belong first. Anything still missing is left out by the leave-out step and comes back later, so the '
-           'migration can go ahead without waiting for everything.</p>']
+           'migration can go ahead without waiting for everything.</p>'
+           '<p class="copynote">Copy commands with the Copy buttons in the HTML version of this report. Some PDF '
+           'viewers turn line breaks into spaces when you copy, which breaks a command printed over two lines '
+           '(its first line ends in <code>\\</code>).</p>']
     for i, (title, steps) in enumerate(phases, 1):
         out.append(f'<h3 class="phase" id="phase-{i}">{_esc(title)}</h3>')
         for s in steps:

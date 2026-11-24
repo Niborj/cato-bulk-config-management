@@ -488,7 +488,7 @@ class GettingStartedGuide(unittest.TestCase):
         out = gs.render_html()
         import preflight_report as pr
         for needle in ("Getting Started Guide to Account Migration", 'class="cato-logo"', "@font-face",
-                       "Gather two API keys", "Run the check", "What to do next", pr._esc(pr.shell_lines(gs.CHECK, 88))):
+                       "Gather two API keys", "Run the check", "What to do next", pr._esc(gs.block([gs.CHECK]))):
             self.assertTrue(needle in out, f"missing from the guide: {needle}")
         scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
         for script, line in (("preflight_check.py", gs.CHECK), ("export_webhooks.py", gs.EXPORT[-1])):
@@ -531,12 +531,23 @@ class PastedCommands(unittest.TestCase):
                 self.assertTrue(line.endswith(" \\"), line)
             self.assertEqual(self._run(shown), self._run(cmd), shown)
 
-    def test_runbook_and_guide_print_the_broken_form(self):
+    def test_guide_blocks_paste_the_same_with_or_without_line_breaks(self):
+        # Some PDF viewers copy line breaks, others turn them into spaces: a guide block must run the same either way.
+        import shlex
+        import subprocess
         import getting_started as gs
-        import preflight_report as pr
-        out = gs.render_html()
-        self.assertIn(pr._esc(pr.shell_lines(gs.EXPORT[0], 88)), out)
-        self.assertIn("white-space:pre;", out)
+        for lines in (gs.ONCE_PER_COMPUTER, gs.ONCE_PER_PAIR, gs.EXPORT, [gs.CHECK]):
+            text = gs.block(lines)
+            for line in text.splitlines():
+                self.assertLessEqual(len(line), gs.LINE_MAX, line)  # never wraps, so never needs a continuation
+                self.assertFalse(line.endswith("\\"), line)
+            flat = text.replace("\n", " ")
+            self.assertEqual(shlex.split(text), shlex.split(flat))
+            self.assertEqual(shlex.split(flat).count("&&"), sum(c.count("&&") for c in lines) + len(lines) - 1)
+            for form in (text, flat):
+                self.assertEqual(subprocess.run(["bash", "-n", "-c", form]).returncode, 0, form)
+                self.assertEqual(subprocess.run(["zsh", "-n", "-c", form]).returncode, 0, form)
+        self.assertIn("white-space:pre;", gs.render_html())
 
     def test_every_runbook_line_fits_and_the_guard_writes_json(self):
         import json

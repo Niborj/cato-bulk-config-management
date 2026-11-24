@@ -16,7 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from preflight_report import COPY_JS, _esc, _font_face, _logo, html_to_pdf, shell_lines  # noqa: E402
+from preflight_report import COPY_JS, _esc, _font_face, _logo, html_to_pdf  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TITLE = "Getting Started Guide to Account Migration"
@@ -28,6 +28,11 @@ ICON_REPORT = f'<svg viewBox="0 0 24 24" {_I}><path d="M14 3H6a2 2 0 0 0-2 2v14a
 ICON_REPEAT = f'<svg viewBox="0 0 24 24" {_I}><path d="M4 12a8 8 0 0 1 14-5.3L20 9M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15M4 20v-5h5"/></svg>'
 ICON_RUN = f'<svg viewBox="0 0 24 24" {_I}><path d="M5 4l14 8-14 8z"/></svg>'
 
+# Each block is one chain: every line but the last ends in "&&". Pasted with its line breaks, the shell
+# carries on to the next line after "&&"; pasted by a PDF viewer that turns line breaks into spaces, it is
+# the same chain on one line. So no command may be split over two lines (a " \\" continuation only works
+# when the line break survives): every line is kept short enough to print on one line (LINE_MAX).
+LINE_MAX = 96
 ONCE_PER_COMPUTER = [
     "git clone https://github.com/catonetworks/cato-bulk-config-management.git",
     "cd cato-bulk-config-management",
@@ -39,13 +44,18 @@ ONCE_PER_PAIR = [
     "catocli configure set --profile target --cato-token 'NEW_KEY' --account-id NEW_NUMBER",
 ]
 EXPORT = [
-    "CATO_PROFILE=source catocli export all --strip-ids --no-account-suffix --output-directory config_data "
-    "--archive-directory config_data_archive",
-    "CATO_PROFILE=source catocli export static_hosts --site-type all -f json --output-directory config_data",
+    "export CATO_PROFILE=source",
+    "catocli export all --strip-ids --no-account-suffix --output-directory config_data",
+    "catocli export static_hosts --site-type all -f json --output-directory config_data",
     "python3 scripts/export_webhooks.py --profile source --config-dir config_data",
 ]
-CHECK = ('python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf '
-         '--customer "CUSTOMER NAME"')
+CHECK = "python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf"
+
+
+def block(lines):
+    """The text of one block: the commands chained with "&&", one per line."""
+    return "\n".join(c + (" &&" if i < len(lines) - 1 else "") for i, c in enumerate(lines))
+
 
 # Print sizes for code: Chrome-printed PDFs split "_" onto its own line when copied at some sizes
 # (9.6px and 8pt do; 9 to 13px in half-pixel steps do not). Check with a PDF text extract after changing them.
@@ -100,8 +110,8 @@ footer img{height:18px;width:auto;flex:none}
 
 
 def _cmds(lines):
-    """One panel per group: a pasted block runs its lines in order (no comment lines, which zsh would reject)."""
-    return f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(chr(10).join(shell_lines(c, 88) for c in lines))}</pre></div>'
+    """One panel per block (no comment lines, which zsh rejects when pasted)."""
+    return f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(block(lines))}</pre></div>'
 
 
 def render_html():
@@ -129,7 +139,7 @@ it's the number after <code>/account/</code> in the CMA's address bar.</p>
 <section class="step"><div class="disc">2</div><div>
 <h2>Run the check</h2>
 <p class="small">Open Terminal (you need git and Python 3). Replace the words in CAPITALS with your own values, keep the
-single quotes around each key, and paste each block in turn.</p>
+single quotes around each key, and paste each block whole: it runs as one.</p>
 <div class="cap">Once per computer</div>{_cmds(ONCE_PER_COMPUTER)}
 <div class="cap">Once per pair of accounts</div>{_cmds(ONCE_PER_PAIR)}
 <div class="cap">Export the current account (read-only, a few minutes)</div>{_cmds(EXPORT)}
