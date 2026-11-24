@@ -134,10 +134,27 @@ The answers it relies on:
 
 ## What it cannot see
 
-The public API exposes no IdP or SCIM configuration, no Static Range Translation
-setting and no per-site LAN Layer 7 switch. For those the check reports what the
-source needs (an ACTION) instead of what the target has. Trial accounts return
-no licence data, so licence capacity on a trial is likewise an ACTION to confirm.
+The public API exposes no IdP or SCIM configuration, no account-level Static
+Range Translation switch and no per-site LAN Layer 7 switch. For those the check
+reports what the source needs (an ACTION) instead of what the target has. Trial
+accounts return no licence data, so licence capacity on a trial is likewise an
+ACTION to confirm.
+
+### What the API can and cannot do here
+
+Every "the API cannot" in this tool was checked against the
+[Cato API reference](https://api.catonetworks.com/documentation/) and the live
+schema on 2026-11-24:
+
+| Object or setting | Read | Create or set | Notes |
+|---|---|---|---|
+| User groups | `user.usersGroupList` | no | No mutation creates, edits or adds members to a user group. `groups.createGroup` creates Advanced Groups, a different object. A SCIM push (`scripts/scim_sync.py`) can create groups, but they are then SCIM groups. |
+| Users | `user.userList` | `user.createUser` (Beta) | Creates a MANUAL user with name, email, department, job title and phone. No group membership. |
+| Dynamic user groups | `user.dynamicUserGroupsConfiguration` | `user.updateDynamicUserGroupsConfiguration` (Beta) | Turns the department attribute on or off. |
+| Custom categories, device posture profiles, bandwidth priorities, user notification templates, DLP content and EDM profiles, RBI profiles | no | no | Only `*Ref` types inside rules. The `posture` API is SaaS Security Posture and `notificationSubscription` is mailing lists; neither is one of these. |
+| Static Range Translation | per range (`translatedSubnet`) | per range | The account-level switch that allows translation is not in the API, and the API refuses a translated subnet while it is off. |
+| LAN Layer 7 enforcement | no | no | Per-site setting, CMA only. |
+| IdP and SCIM app configuration | no | no | Only the users and groups it provisions are visible (`userImportType: SCIM`). |
 
 ## Example: a reference tenant into a fresh trial tenant
 

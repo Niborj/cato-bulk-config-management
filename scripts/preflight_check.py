@@ -669,11 +669,13 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
     t_user_emails = {(u.get("email") or "").lower() for u in tgt["users"]}
 
     by_type, missing_rules, type_rules = defaultdict(list), set(), defaultdict(set)
+    kinds = defaultdict(Counter)  # itype -> {"groups": n, "users": n}
     for name, rules in sorted(refs.get("usersGroup", {}).items()):
         if name in t_groups:
             continue
         itype = (s_groups.get(name) or {}).get("importType") or "NOT IN SOURCE"
         by_type[itype].append(f"user group '{name}' ({len(rules)} rule(s))")
+        kinds[itype]["groups"] += 1
         missing_rules.update(rules)
         type_rules[itype].update(rules)
     for name, rules in sorted(refs.get("user", {}).items()):
@@ -682,6 +684,7 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
             continue
         itype = (su or {}).get("userImportType") or "NOT IN SOURCE"
         by_type[itype].append(f"user '{name}' ({len(rules)} rule(s))")
+        kinds[itype]["users"] += 1
         missing_rules.update(rules)
         type_rules[itype].update(rules)
     fixes = {
@@ -689,14 +692,20 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
                 "or push from the source with `scripts/scim_sync.py export` then `push --target-profile <p>` "
                 "(the target profile needs scim_url and scim_token). Groups must exist before the policies apply.",
         "LDAP": "Connect the target to the same directory (Directory Services > LDAP/AD) and sync these users/groups.",
-        "MANUAL": "Create these in the target CMA by hand: the public API has no call to create a user group.",
-        "DYNAMIC": "Turn on dynamic user groups (department) in the target and make sure the attribute is populated.",
+        "MANUAL": "Create the user groups in the target CMA with the same names and members: the public API has no "
+                  "mutation for user groups (`groups.createGroup` makes Advanced Groups, a different object). Manual "
+                  "users can be created in the CMA or with `user.createUser` (Beta), which sets name, email and "
+                  "department but not group membership. A SCIM push can also create the groups, but they then "
+                  "belong to SCIM rather than MANUAL.",
+        "DYNAMIC": "Turn on dynamic user groups (department) in the target, in the CMA or with "
+                   "`user.updateDynamicUserGroupsConfiguration` (Beta), and make sure the attribute is populated.",
         "INTEGRATION": "Recreate the identity integration that provides these in the source.",
         "NOT IN SOURCE": "These names are in the export but not in the source tenant's user list: stale references. "
                          "Tidy the rules in the source, or leave them out of the run.",
     }
     for itype in sorted(by_type):
-        rep.add(cat, "BLOCKER", "id_missing", {"type": itype, "n": len(by_type[itype])}, f"{len(by_type[itype])} {itype} identities the rules name are missing in the target",
+        rep.add(cat, "BLOCKER", "id_missing", {"type": itype, "n": len(by_type[itype]),
+                                               "groups": kinds[itype]["groups"], "users": kinds[itype]["users"]}, f"{len(by_type[itype])} {itype} identities the rules name are missing in the target",
                 items=by_type[itype], fix=fixes.get(itype, ""), rules=type_rules[itype])
     total_refs = len(refs.get("usersGroup", {})) + len(refs.get("user", {}))
     if total_refs and not by_type:
@@ -804,8 +813,10 @@ def check_features(rep, exp, refs, probes):
                     translated.append(f'{s["name"]} / {r.get("name")}: {sn} -> {ts}')
     if translated:
         rep.add(cat, "ACTION", "feat_srt", {"n": len(translated)}, f"{len(translated)} network range(s) use real Static Range Translation",
-                items=translated, fix="Enable Static Range Translation in the target (Resources > System Settings). "
-                                      "The API cannot read or set it.")
+                items=translated, fix="Enable Static Range Translation for the target account in the CMA (Resources > "
+                                      "System Settings) before the sites go in. The API reads and sets each range's "
+                                      "translated subnet, and refuses one while the feature is off, but has no call "
+                                      "for the account-level switch.")
     else:
         rep.add(cat, "OK", "feat_srt_ok", {}, "No real Static Range Translation in the source (identity translations are skipped "
                            "by the sites module)")

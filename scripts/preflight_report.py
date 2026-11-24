@@ -114,11 +114,25 @@ def guide(f):
     if k == "id_missing":
         t = c.get("type")
         if t == "MANUAL":
-            return _g("cma_admin", f"Create {n} user group{'s' if n != 1 else ''} in the CMA",
-                      "These groups were created by hand in your current account. The Cato API can't create user groups, "
-                      "so they need to be created in the Cato Management Application (CMA) with exactly the same names."
-                      + affects,
-                      ["In the CMA, create each group listed here with the same name, and add its members."])
+            ng = c.get("groups", n if "users" not in c else 0)
+            nu = c.get("users", 0)
+            what = " and ".join(x for x in (f"{ng} user group{'s' if ng != 1 else ''}" if ng else "",
+                                            f"{nu} user{'s' if nu != 1 else ''}" if nu else "") if x)
+            why = ("These were created by hand in your current account. The Cato API can't create user groups or "
+                   "set group membership, so the groups need to be created in the Cato Management Application (CMA) "
+                   "with exactly the same names and members." if ng else
+                   "These users were created by hand in your current account, and your policy rules name them.")
+            if nu:
+                why += (" Users can be created in the CMA, or by your migration team through the Cato API."
+                        if ng else " They can be created in the CMA, or by your migration team through the Cato API.")
+            steps = []
+            if nu:
+                steps.append("Create each user listed here with the same name and email address, in the CMA or with "
+                             "your migration team.")
+            if ng:
+                steps += ["In the CMA, create each group listed here with exactly the same name.",
+                          "Add the same members to each group as in your current account."]
+            return _g("cma_admin", f"Create {what}" + (" in the CMA" if ng and not nu else ""), why + affects, steps)
         if t == "SCIM":
             return _g("identity", f"Provision {n} users and groups through SCIM",
                       "Your policy rules refer to these users and groups by name. Your current account receives them from "
@@ -134,7 +148,9 @@ def guide(f):
         if t == "DYNAMIC":
             return _g("cma_admin", f"Turn on {n} dynamic user groups",
                       "These groups are built automatically from user attributes such as department." + affects,
-                      ["In the CMA, turn on dynamic user groups and confirm the attribute is populated."])
+                      ["Turn on dynamic user groups for the department attribute, in the CMA or with your migration "
+                       "team through the Cato API.",
+                       "Confirm the department attribute is filled in for the users these groups should hold."])
         return _g("migration", f"Review {n} users and groups that no longer exist",
                   "Your policy rules name these, but they aren't in your current account any more." + affects,
                   ["Decide with your migration team whether to tidy these rules before the migration."])
@@ -172,7 +188,10 @@ def guide(f):
                    "\u201cUnsupported field [addRule]\u201d."])
     if k == "feat_srt":
         return _g("cma_admin", "Turn on Static Range Translation",
-                  f"{n} of your network ranges translate addresses, which needs Static Range Translation on the account.",
+                  (f"{n} of your network ranges translates addresses" if n == 1 else
+                   f"{n} of your network ranges translate addresses")
+                  + ". The new account accepts these translations only once Static Range Translation is turned on, "
+                  "and that account setting can only be changed in the CMA.",
                   ["In the CMA, turn on Static Range Translation for the new account before the sites are created."])
     if k == "feat_l7":
         sites = ", ".join(c.get("sites") or [])
@@ -482,7 +501,7 @@ wait on an item to do or confirm.</p>
     parts.append("""<h2>What this check can't confirm for you</h2>
 <div class="note"><p>The Cato API doesn't expose a few settings, so please confirm these directly:</p><ul>
 <li>Your identity provider's SCIM or directory settings (the check sees only the users and groups they create).</li>
-<li>Static Range Translation, if your network ranges translate addresses.</li>
+<li>Whether Static Range Translation is turned on for the account, if your network ranges translate addresses (the check sees each range's translation, not the account setting).</li>
 <li>LAN Layer 7 enforcement on each site.</li>
 <li>License quantities on a trial account, which doesn't report them.</li></ul></div>""")
 

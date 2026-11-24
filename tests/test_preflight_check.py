@@ -116,6 +116,7 @@ class Checks(unittest.TestCase):
         blockers = [f for f in rep.findings if f["severity"] == "BLOCKER"]
         self.assertEqual(len(blockers), 1)
         self.assertIn("MANUAL", blockers[0]["title"])
+        self.assertEqual((blockers[0]["ctx"]["groups"], blockers[0]["ctx"]["users"]), (1, 0))
         self.assertTrue(any(f["severity"] == "ACTION" and "SCIM" in f["title"] for f in rep.findings))
 
     def test_classic_groups_already_converted_are_ok(self):
@@ -194,6 +195,18 @@ class CustomerReport(unittest.TestCase):
         f = {"key": "id_missing", "rules": [], "title": "", "detail": ""}
         self.assertEqual(self.pr.guide(dict(f, ctx={"type": "SCIM", "n": 3}))["owner"], "identity")
         self.assertEqual(self.pr.guide(dict(f, ctx={"type": "MANUAL", "n": 3}))["owner"], "cma_admin")
+
+    def test_manual_users_and_groups_are_worded_apart(self):
+        # The API can create users (user.createUser) but not user groups, so the wording must not lump them.
+        f = {"key": "id_missing", "rules": [], "title": "", "detail": ""}
+        groups = self.pr.guide(dict(f, ctx={"type": "MANUAL", "n": 2, "groups": 2, "users": 0}))
+        self.assertEqual(groups["title"], "Create 2 user groups in the CMA")
+        mixed = self.pr.guide(dict(f, ctx={"type": "MANUAL", "n": 3, "groups": 1, "users": 2}))
+        self.assertEqual(mixed["title"], "Create 1 user group and 2 users")
+        self.assertIn("through the Cato API", mixed["why"])
+        users = self.pr.guide(dict(f, ctx={"type": "MANUAL", "n": 1, "groups": 0, "users": 1}))
+        self.assertEqual(users["title"], "Create 1 user")
+        self.assertNotIn("can't create user groups", users["why"])
 
     def test_friendly_text(self):
         fr = self.pr._friendly
