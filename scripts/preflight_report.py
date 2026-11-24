@@ -96,7 +96,9 @@ def guide(f):
         names = ", ".join(FAMILY_NAMES.get(x, x) for x in c.get("families") or [])
         if k == "perm_source":
             return _g("cma_admin", f"Let the current account's API key read {_pl(n, 'more policy', 'more policies')}",
-                      f"The key can't read {names}, so the export stops there and everything after it is missing too.",
+                      f"The key can't read {names}, so the export carried on without "
+                      + ("it" if n == 1 else "them") + " and " + ("its" if n == 1 else "their")
+                      + " rules can't be migrated yet.",
                       ["Create the key as an admin whose role can view the whole account (the predefined Viewer or "
                        "Editor role), or add " + ("this permission" if len(perms) == 1 else "these permissions")
                        + " to its role: " + ", ".join(perms) + ".",
@@ -343,7 +345,9 @@ def guide(f):
 def ready_text(f):
     k, c = f["key"], f["ctx"]
     return {
-        "export_ok": f"Your configuration export is complete ({c.get('rules')} policy rules across {c.get('policies')} policies).",
+        "export_ok": (f"Apart from what the API key wasn't allowed to read, your configuration export is complete "
+                      f"({c.get('rules')} policy rules across {c.get('policies')} policies)." if c.get("partial") else
+                      f"Your configuration export is complete ({c.get('rules')} policy rules across {c.get('policies')} policies)."),
         "export_hosts_ok": f"All {c.get('n')} static hosts were exported.",
         "lic_ips_ok": f"The new account has enough public IP address licenses ({c.get('need')} needed).",
         "lic_ztna_ok": f"The new account has enough ZTNA user licenses ({c.get('need')} needed).",
@@ -654,23 +658,27 @@ def build_runbook(rep, meta):
         return s
 
     exported = has("export_ok") and not has("export_incomplete", "export_hosts_short")
+    done_here = "Already done on the machine that made this report: skip this step there."
     setup = [
         step("tools", "Get the tools and the code",
-             "You need Terraform 1.7 or newer, Python 3, git, and the Cato CLI (pip install catocli, ideally in its "
-             "own virtual environment). Then download the migration repo and work inside it. Every command in this "
-             "part runs from the cato-bulk-config-management folder.",
-             ["git clone https://github.com/catonetworks/cato-bulk-config-management.git",
-              "cd cato-bulk-config-management"],
-             note=(f"This report was made on a machine that serves Terraform provider {run.get('provider_version')} "
-                   "from a local build in ~/.terraform.d/mirror, so the deploy steps pass --mirror. Build the "
-                   "provider the same way on any other machine, or drop --mirror from migrate.sh once those "
-                   "provider fixes are released.") if run.get("mirror") else None),
+             "You need Terraform 1.7 or newer, Python 3 and git. This downloads the migration repo into a new "
+             "cato-bulk-config-management folder and installs the Cato CLI inside it. Every command in this part "
+             "runs from that folder. In a new terminal window, go back into the folder (cd "
+             "cato-bulk-config-management) and run the last line again first, or the Cato CLI isn't found.",
+             TOOLS_CMDS,
+             note=done_here + ((f" It serves Terraform provider {run.get('provider_version')} from a local build in "
+                                "~/.terraform.d/mirror, so the deploy steps pass --mirror. Build the provider the same "
+                                "way on any other machine, or drop --mirror from migrate.sh once those provider fixes "
+                                "are released.") if run.get("mirror") else "")),
         step("keys", "Save the two API keys as profiles",
-             f"Each profile asks for its key (paste it; it isn't shown) and the account number: {sa} for the current "
-             f"account, with a view-only key, and {ta} for the new account, with a key that can edit. Press Return to "
-             "skip the other questions. The last two commands show which account each profile points at.",
-             [f"catocli configure set --profile {_q(sp)}", f"catocli configure set --profile {_q(tp)}",
-              f"python3 scripts/cato_profile.py {_q(sp)}", f"python3 scripts/cato_profile.py {_q(tp)}"]),
+             "Replace CURRENT_KEY with the current account's view-only key and NEW_KEY with the new account's key "
+             "that can edit, keeping the single quotes. Each key is tested before it's saved: if catocli prints "
+             "ERROR, that key wasn't saved, so fix it and run its line again on its own. The last two commands "
+             f"show which account each profile points at: {sa} for {sp} and {ta} for {tp}.",
+             [f"catocli configure set --profile {_q(sp)} --cato-token 'CURRENT_KEY' --account-id {_q(sa)}",
+              f"catocli configure set --profile {_q(tp)} --cato-token 'NEW_KEY' --account-id {_q(ta)}",
+              f"python3 scripts/cato_profile.py {_q(sp)}", f"python3 scripts/cato_profile.py {_q(tp)}"],
+             note=done_here),
         step("export", "Export the current account",
              "Reads every setting the migration copies into files, and only reads. If the key is refused a type "
              "for lack of permission, it carries on with the rest and the check lists what was refused.",
@@ -707,11 +715,13 @@ def build_runbook(rep, meta):
         prepare.append(step("scim", "Copy users and groups (test accounts only)",
                             "For a real migration, your identity team provisions users and groups into the new account "
                             "(the identity items above). For a test account you can copy them instead. Everything copied "
-                            "arrives as SCIM. Create the new account's SCIM integration first; the first command asks "
-                            "for its SCIM URL and token (press Return to keep the key and account number). The second "
-                            "shows what it would copy and asks before copying. Afterwards, delete "
-                            f"{cfg}/scim_users.csv and scim_groups.csv: they hold people's names and email addresses.",
-                            [f"catocli configure set --profile {_q(tp)}", f"sh {_q(script_path)} copy-users"],
+                            "arrives as SCIM. Create the new account's SCIM integration first, then replace SCIM_URL "
+                            "and SCIM_TOKEN with its URL and token, keeping the single quotes: the first command adds "
+                            f"them to the {tp} profile. The second shows what it would copy and asks before copying. "
+                            f"Afterwards, delete {cfg}/scim_users.csv and scim_groups.csv: they hold people's names "
+                            "and email addresses.",
+                            [f"catocli configure set --profile {_q(tp)} --scim-url 'SCIM_URL' --scim-token 'SCIM_TOKEN'",
+                             f"sh {_q(script_path)} copy-users"],
                             script=[("run", f"python3 scripts/scim_sync.py export --source-profile {_q(sp)}"),
                                     ("run", f"python3 scripts/scim_sync.py push --target-profile {_q(tp)}"),
                                     ("confirm", f"Copy these users and groups into account {ta} for real?"),
@@ -839,6 +849,15 @@ def build_runbook(rep, meta):
             s["text"] = re.sub(r"\{step:(\w+)\}", lambda m: f"step {ids.get(m.group(1), '?')}", s["text"])
     return phases
 
+
+# Step 1 of Part 2, the same lines as the getting started guide's first block: without the virtual environment
+# and the PATH line, the next step's `catocli` isn't found.
+TOOLS_CMDS = [
+    "git clone https://github.com/catonetworks/cato-bulk-config-management.git",
+    "cd cato-bulk-config-management",
+    "python3 -m venv .venv && .venv/bin/pip install catocli",
+    'export PATH="$PWD/.venv/bin:$PATH"',
+]
 
 CMD_LINE_MAX = 100  # longest command line Part 2 prints (10px code fits ~104 on an A4 line): wider would wrap in
 # print, and a wrapped line breaks when copied

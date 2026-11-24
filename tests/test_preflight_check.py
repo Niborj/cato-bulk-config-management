@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v
 """
 import os
+import re
 import sys
 import unittest
 
@@ -278,7 +279,15 @@ class KeyPermissions(unittest.TestCase):
         self.assertEqual(g["owner"], "cma_admin")
         self.assertIn("Socket Bypass", g["why"])
         self.assertIn("Socket Bypass.", g["steps"][0])
+        self.assertIn("carried on without it", g["why"])  # export_source.py doesn't stop there
+        self.assertNotIn("stops", g["why"] + f["fix"].replace("on its own stops there", ""))
         self.assertNotIn("perm_ok", [x["key"] for x in rep.findings])
+        pc.check_export(rep, exp, src)  # the rest of the export is complete, and says so without claiming it all is
+        ok = [x for x in rep.findings if x["key"] == "export_ok"][0]
+        self.assertTrue(pr.ready_text(ok).startswith("Apart from what the API key wasn't allowed to read"))
+        rep2 = pc.Report()
+        pc.check_export(rep2, exp, tenant(policies={"internetFirewall": {"enabled": True, "rules": ["A"]}}))
+        self.assertTrue(pr.ready_text(rep2.findings[0]).startswith("Your configuration export is complete"))
 
     def test_policy_left_out_of_the_export_is_a_blocker(self):
         src = tenant(policies={"internetFirewall": {"enabled": True, "rules": ["A"]},
@@ -466,12 +475,25 @@ class CustomerReport(unittest.TestCase):
                 items=["internetFirewall: 1 (X)", "socketLan: 1 (Y)"])
         rep.add("features", "ACTION", "feat_wifi", {"n": 1}, "w", items=["HQ:Corp"])
         rep.add("features", "ACTION", "feat_l7", {"n": 1, "sites": ["HQ"]}, "l", items=["NR / FW (sites: HQ)"])
+        rep.add("identity", "BLOCKER", "id_missing", {"type": "SCIM", "n": 1, "groups": 1, "users": 0}, "x",
+                items=["user group 'G'"], rules=["internetFirewall: A"])
         exp = export(rules=[rule("wanNetwork", "A")])
         phases = self.pr.build_runbook(rep, self._meta())
         steps = {s["id"]: s for _, st in phases for s in st}
         runs = [c for s in steps.values() for c in s["runs"]]
         files = [s["file"] for s in steps.values() if s.get("file")]
-        self.assertEqual(steps["keys"]["cmds"][0], "catocli configure set --profile src-ro")  # asks for the key itself
+        # Step 1 installs the CLI the way the getting started guide does, or step 2's catocli isn't found.
+        self.assertEqual(steps["tools"]["cmds"][2:], ["python3 -m venv .venv && .venv/bin/pip install catocli",
+                                                      'export PATH="$PWD/.venv/bin:$PATH"'])
+        self.assertEqual(steps["keys"]["cmds"][:2], [
+            "catocli configure set --profile src-ro --cato-token 'CURRENT_KEY' --account-id 111",
+            "catocli configure set --profile 'new acct' --cato-token 'NEW_KEY' --account-id 222"])
+        for sid in ("tools", "keys"):
+            self.assertIn("Already done on the machine that made this report", steps[sid]["note"])
+        self.assertEqual(steps["scim"]["cmds"][0],
+                         "catocli configure set --profile 'new acct' --scim-url 'SCIM_URL' --scim-token 'SCIM_TOKEN'")
+        self.assertFalse([c for s in steps.values() for c in s["cmds"]
+                          if re.fullmatch(r"catocli configure set --profile \S+", c)])  # no bare prompts
         self.assertEqual(steps["purge"]["cmds"], ["sh preflight/migrate.sh clear-samples"])
         self.assertIn("python3 scripts/purge_all.py --profile 'new acct' --only internet_firewall,lan_firewall --execute", runs)
         self.assertIn("sh preflight/scope_command.sh", steps["leaveout"]["runs"])

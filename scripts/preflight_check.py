@@ -578,8 +578,8 @@ def run_probes(api, refs, export, log):
 # Checks
 # --------------------------------------------------------------------------
 def check_permissions(rep, exp, src, tgt):
-    """Policies a key can't read: the export stops at the first one, and a target key that can't read a policy
-    can't deploy it either. Also policies the source has that the export lacks (an export cut short)."""
+    """Policies a key can't read: the export carries on without them (export_source.py), and a target key that
+    can't read a policy can't deploy it either. Also policies the source has that the export lacks (an export cut short)."""
     cat = "access"
     for side, t, key in (("source", src, "perm_source"), ("target", tgt, "perm_target")):
         denied = sorted(f for f, info in (t.get("policies") or {}).items()
@@ -591,9 +591,9 @@ def check_permissions(rep, exp, src, tgt):
                     f"The {who} account's API key cannot read {_pl(len(denied), 'policy', 'policies')}",
                     items=[f"{f}: needs the '{POLICY_PERMISSION.get(f, f)}' permission" for f in denied],
                     fix=("Use a key from an admin whose role can view the whole account (the predefined Viewer or Editor "
-                         "role), or add these permissions to the key's role in the CMA, then export again. "
-                         "`catocli export all` stops at the first policy it is refused, so everything after it is "
-                         "missing too." if side == "source" else
+                         "role), or add these permissions to the key's role in the CMA, then run scripts/export_source.py "
+                         "again. It carries on past a refused policy (`catocli export all` on its own stops there), "
+                         "but that policy's rules stay out of the export until the key can read it." if side == "source" else
                          "Use a key from an admin whose role can edit the whole account (the predefined Editor role), or "
                          "add these permissions to the key's role in the CMA. A key that can't read a policy can't "
                          "deploy it either."))
@@ -649,11 +649,15 @@ def check_export(rep, exp, src):
     cat = "export"
     if exp["missing_files"]:
         rep.add(cat, "BLOCKER", "export_incomplete", {"n": len(exp["missing_files"])}, f"Source export in {exp['dir']} is incomplete", items=exp["missing_files"],
-                fix="Re-run `catocli export all` (in two halves if it stops early, and check its summary: it can exit 0 "
-                    "after a connection reset), then `catocli export static_hosts --site-type all` and "
+                fix="Run scripts/export_source.py again and check its summary (catocli can exit 0 after a connection "
+                    "reset). It runs `catocli export all`, `catocli export static_hosts --site-type all` and "
                     "`scripts/export_webhooks.py`.")
     else:
-        rep.add(cat, "OK", "export_ok", {"rules": len(exp["rules"]), "policies": len(exp["policy_enabled"])}, f"Source export in {exp['dir']} has every file the bulk folders read "
+        # partial: a policy the key may not read is missing however complete the rest is (check_permissions says which)
+        partial = bool((exp.get("export_report") or {}).get("refused")) or any(
+            "error" in info and _DENIED.search(info["error"]) for info in (src.get("policies") or {}).values())
+        rep.add(cat, "OK", "export_ok", {"rules": len(exp["rules"]), "policies": len(exp["policy_enabled"]),
+                                         "partial": partial}, f"Source export in {exp['dir']} has every file the bulk folders read "
                            f"({len(exp['rules'])} rules across {len(exp['policy_enabled'])} policies)")
     n_export, n_live = len(exp["static_hosts"]), src.get("host_total")
     if n_live is not None and n_export < n_live:

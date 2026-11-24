@@ -111,10 +111,13 @@ What it holds:
   short line and copies cleanly even from a PDF viewer that turns line breaks
   into spaces. Each step shows what it runs, stops if a command fails, and
   asks before anything that deletes or copies into the new account. The
-  first steps on a new machine (getting the repo, saving the keys with
-  `catocli configure set --profile NAME`, which asks for the key without
-  showing it, the first export and check) are printed as short lines chained
-  with `&&`, since `migrate.sh` doesn't exist yet.
+  first steps on a new machine are printed as short lines chained with `&&`,
+  since `migrate.sh` doesn't exist yet: getting the repo and installing the
+  Cato CLI in its own virtual environment (the same lines as the getting
+  started guide), saving the keys with `catocli configure set --profile NAME
+  --cato-token 'KEY' --account-id NUMBER` (account numbers filled in), the
+  first export and the first check. The first two say they're already done on
+  the machine that made the report.
 - Appendix A: each affected policy rule once, with the numbered items it waits on.
   The cover, the action plan summary and this appendix all count the same rules.
 - Appendix B: the technical notes for the migration engineers.
