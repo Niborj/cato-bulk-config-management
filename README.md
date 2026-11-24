@@ -215,6 +215,7 @@ Everything else under `config_data/` is gitignored (point-in-time tenant data).
 | Script | Purpose |
 |---|---|
 | `scripts/bulk_apply.py` | Plan/apply/deploy/destroy every folder in order |
+| `scripts/export_source.py` | Exports the source account for a migration (`catocli export all`, static hosts on every site type, webhooks) and carries on past any type the key is refused for lack of permission, recording it in `config_data/export_report.json` for the check to report |
 | `scripts/preflight_check.py` | Before-you-migrate dependency check: compares source and target (licences, PoPs, SCIM/IdP users and groups, CMA-only objects, features, factory rules) and lists what to enable or create first, plus a Cato-branded readiness report for the customer (HTML, `--pdf` for PDF). See [docs/preflight-check.md](docs/preflight-check.md) |
 | `scripts/purge_all.py` + `scripts/purge/` | Clear all policies/dependencies from a TARGET tenant |
 | `scripts/scim_sync.py` | Export/push/purge SCIM users + groups |

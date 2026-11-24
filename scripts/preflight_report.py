@@ -106,6 +106,21 @@ def guide(f):
                   ["Create the key as an admin whose role can edit the whole account (the predefined Editor role), or "
                    "add " + ("this permission" if len(perms) == 1 else "these permissions") + " to its role: "
                    + ", ".join(perms) + "."])
+    if k == "export_refused":
+        perms = c.get("permissions") or []
+        types = ", ".join(c.get("types") or [])
+        return _g("cma_admin", f"Let the current account's API key export {_pl(n, 'more item type')}",
+                  f"The export was refused {types} for lack of permission, so "
+                  + ("it is" if n == 1 else "they are") + " missing from the migration.",
+                  (["Add " + ("this permission" if len(perms) == 1 else "these permissions") + " to the key's admin "
+                    "role: " + ", ".join(perms) + ". Or create the key as an admin whose role can view the whole "
+                    "account (the predefined Viewer or Editor role)."] if perms else
+                   ["Create the key as an admin whose role can view the whole account (the predefined Viewer or "
+                    "Editor role)."]) + ["Then export the current account again."])
+    if k == "export_failed":
+        return _g("migration", f"Export {_pl(n, 'item type')} again",
+                  "Part of the export failed for a reason other than permissions, so the migration would miss it.",
+                  ["Fix the cause shown in the technical notes, then export the current account again."])
     if k == "export_policy_missing":
         return _g("migration", f"Export {_pl(n, 'missing policy', 'missing policies')} again",
                   "These policies have rules in your current account but aren't in the export, so the migration would "
@@ -575,7 +590,8 @@ def _type_parts(limit=72):
         cur.append(t)
     return parts + [",".join(cur)]
 # Which action plan items belong before which deploy step.
-BEFORE_FOUNDATIONS = ("access_same_account", "perm_source", "perm_target", "export_policy_missing", "export_incomplete", "export_hosts_short", "lic_ips_short", "lic_ips_unknown",
+BEFORE_FOUNDATIONS = ("access_same_account", "perm_source", "perm_target", "export_refused", "export_failed",
+                      "export_policy_missing", "export_incomplete", "export_hosts_short", "lic_ips_short", "lic_ips_unknown",
                       "lic_sites_short", "lic_sites_unknown", "lic_sites_none", "pop_missing", "feat_srt", "feat_wifi",
                       "feat_webhooks", "int_classic", "tgt_existing_named", "access_trial")
 BEFORE_POLICIES = ("id_missing", "id_scim_inactive", "id_ldap_inactive", "id_scim_endpoint_fail", "cma_missing",
@@ -656,16 +672,13 @@ def build_runbook(rep, meta):
              [f"catocli configure set --profile {_q(sp)}", f"catocli configure set --profile {_q(tp)}",
               f"python3 scripts/cato_profile.py {_q(sp)}", f"python3 scripts/cato_profile.py {_q(tp)}"]),
         step("export", "Export the current account",
-             "Reads every setting the migration copies into files, and only reads.",
-             [f"export CATO_PROFILE={_q(sp)}",
-              f"catocli export all --strip-ids --no-account-suffix --output-directory {_q(cfg)}",
-              f"catocli export static_hosts --site-type all -f json --output-directory {_q(cfg)}",
-              f"python3 scripts/export_webhooks.py --profile {_q(sp)} --config-dir {_q(cfg)}"],
+             "Reads every setting the migration copies into files, and only reads. If the key is refused a type "
+             "for lack of permission, it carries on with the rest and the check lists what was refused.",
+             [f"python3 scripts/export_source.py --profile {_q(sp)}" + (f" --config-dir {_q(cfg)}" if cfg != "config_data" else "")],
              before=("export_incomplete", "export_hosts_short"),
              note=("Already done for this report. Run it again if the current account changes, then run the check "
                    "again.") if exported else None),
     ]
-    setup[-1]["sep"] = ";"  # a type refused for lack of permission must not stop the static hosts and webhooks
     setup += [
         step("firstcheck", "Run the check on this machine",
              f"Writes this report and {script_path}, which runs every step from here on. Already done on the "

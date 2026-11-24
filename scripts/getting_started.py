@@ -43,12 +43,9 @@ ONCE_PER_PAIR = [
     "catocli configure set --profile source --cato-token 'CURRENT_KEY' --account-id CURRENT_NUMBER",
     "catocli configure set --profile target --cato-token 'NEW_KEY' --account-id NEW_NUMBER",
 ]
-EXPORT = [
-    "export CATO_PROFILE=source",
-    "catocli export all --strip-ids --no-account-suffix --output-directory config_data",
-    "catocli export static_hosts --site-type all -f json --output-directory config_data",
-    "python3 scripts/export_webhooks.py --profile source --config-dir config_data",
-]
+# export_source.py runs catocli's export, the static hosts on every site type and the webhooks, and carries on
+# past any type the key is refused for lack of permission (recorded for the check to report).
+EXPORT = ["python3 scripts/export_source.py --profile source"]
 CHECK = "python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf"
 
 
@@ -138,9 +135,9 @@ def render_html():
 </div>
 <p class="small">Create each key in that account's Cato Management Application (CMA) under Resources &gt; API Keys
 (Admin API Keys in newer versions), signed in as an admin whose role covers the whole account (Viewer or Editor), and
-copy it at once: it's shown only once. A narrower role can't read every policy: the export then stops with
-"Access denied" and names the permission the role is missing. Note each account number too: it's the number after
-<code>/account/</code> in the CMA's address bar.</p>
+copy it at once: it's shown only once. A narrower role can't read every policy: the export carries on without
+those, and the check names each permission the role is missing. Note each account number too: it's the number
+after <code>/account/</code> in the CMA's address bar.</p>
 </div></section>
 
 <section class="step"><div class="disc">2</div><div>

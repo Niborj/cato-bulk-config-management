@@ -538,7 +538,7 @@ class GettingStartedGuide(unittest.TestCase):
                        "Gather two API keys", "Run the check", "What to do next", pr._esc(gs.block([gs.CHECK]))):
             self.assertTrue(needle in out, f"missing from the guide: {needle}")
         scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
-        for script, line in (("preflight_check.py", gs.CHECK), ("export_webhooks.py", gs.EXPORT[-1])):
+        for script, line in (("preflight_check.py", gs.CHECK), ("export_source.py", gs.EXPORT[0])):
             helptext = subprocess.run([sys.executable, os.path.join(scripts, script), "--help"],
                                       capture_output=True, text=True).stdout
             for flag in re.findall(r"(--[a-z-]+)", line):
@@ -647,3 +647,99 @@ class PastedCommands(unittest.TestCase):
         exports = [c for _, st in phases for s in st if s["id"] == "export_target" for c in s["runs"]]
         types = ",".join(c.split("--types ")[1] for c in exports if "--types " in c).split(",")
         self.assertEqual(sorted(types), sorted(pr.EXPORT_TYPES))  # every type still exported once
+
+
+FAKE_CATOCLI = r'''#!PYTHON
+"""Stand-in for catocli 3.3.0's export: aborts `export all` at the first type in $DENY, like the real one."""
+import os, sys
+TYPES = ["a_rules", "groups", "sb_rules", "wf_rules", "wnw_rules"]
+args = sys.argv[1:]
+with open(os.environ["CALLS"], "a") as fh:
+    fh.write(" ".join(args) + "\n")
+deny = [t for t in os.environ.get("DENY", "").split(",") if t]
+if args[:2] == ["export", "all"]:
+    types = args[args.index("--types") + 1].split(",") if "--types" in args else TYPES
+    if types == ["_"]:
+        print("ERROR: --types: unknown export type(s): _. Valid types: " + ", ".join(TYPES))
+        sys.exit(1)
+    for i, t in enumerate(types, 1):
+        print(f"[{i}/{len(types)}] {t}: exporting...")
+        if t in deny:
+            print(f"[{i}/{len(types)}] {t}: FAILED (Unexpected error during API call - API returned errors: Access "
+                  f"denied: Insufficient privileges for account 1234567)")
+            if os.environ.get("NOABORT"):
+                continue
+            print(f"\nABORTING: the API key does not have sufficient permissions for this operation (access denied "
+                  f"on '{t}') - skipping the remaining {len(types) - i} export type(s).")
+            sys.exit(1)
+        print(f"[{i}/{len(types)}] {t}: OK -> config_data/{t}.json (+ stripped)")
+    sys.exit(1 if deny and os.environ.get("NOABORT") else 0)
+if args[:2] == ["export", "static_hosts"]:
+    print('{"success": true}')
+    sys.exit(0)
+sys.exit(2)
+'''
+
+
+class ExportSource(unittest.TestCase):
+    """export_source.py carries on past types the key is refused, and records them for the check."""
+
+    def _run(self, deny="", noabort=False):
+        import json
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        os.makedirs(os.path.join(d, "bin"))
+        fake = os.path.join(d, "bin", "catocli")
+        with open(fake, "w") as fh:
+            fh.write(FAKE_CATOCLI.replace("PYTHON", sys.executable))
+        os.chmod(fake, 0o755)
+        env = dict(os.environ, PATH=os.path.join(d, "bin") + os.pathsep + os.environ["PATH"], DENY=deny,
+                   CALLS=os.path.join(d, "calls.log"), NOABORT="1" if noabort else "")
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "export_source.py")
+        r = subprocess.run([sys.executable, script, "--profile", "src", "--config-dir", os.path.join(d, "out"),
+                            "--no-webhooks"], env=env, capture_output=True, text=True)
+        with open(os.path.join(d, "out", "export_report.json")) as fh:
+            report = json.load(fh)
+        with open(os.path.join(d, "calls.log")) as fh:
+            calls = fh.read().splitlines()
+        return r, report, calls
+
+    def test_a_refused_type_is_skipped_and_the_rest_still_export(self):
+        r, report, calls = self._run(deny="sb_rules")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual([x["type"] for x in report["refused"]], ["sb_rules"])
+        self.assertEqual(report["failed"], [])
+        for t in ("a_rules", "groups", "wf_rules", "wnw_rules", "static_hosts --site-type all"):
+            self.assertIn(t, report["exported"])
+        self.assertTrue(any(c.endswith("--types wf_rules,wnw_rules") for c in calls), calls)  # only what was skipped
+
+    def test_several_refusals_each_get_a_rerun(self):
+        _, report, calls = self._run(deny="groups,wf_rules")
+        self.assertEqual(sorted(x["type"] for x in report["refused"]), ["groups", "wf_rules"])
+        self.assertIn("wnw_rules", report["exported"])
+        self.assertEqual(sum(c.startswith("export all --strip-ids") for c in calls), 3)
+
+    def test_a_catocli_that_carries_on_by_itself_needs_one_run(self):
+        _, report, calls = self._run(deny="sb_rules", noabort=True)
+        self.assertEqual([x["type"] for x in report["refused"]], ["sb_rules"])
+        self.assertEqual(sum(c.startswith("export all --strip-ids") for c in calls), 1)
+
+    def test_the_check_reports_refused_types_with_their_permission(self):
+        exp = export(rules=[rule("internetFirewall", "A")])
+        exp["policy_enabled"] = {"internetFirewall": True}
+        exp["export_report"] = {"refused": [{"type": "sb_rules", "error": "Access denied: Insufficient privileges"}],
+                                "failed": []}
+        src_ok = tenant(policies={"internetFirewall": {"enabled": True, "rules": ["A"]}})
+        rep = pc.Report()
+        pc.check_permissions(rep, exp, src_ok, tenant(policies={"internetFirewall": {"enabled": True, "rules": []}}))
+        f = [x for x in rep.findings if x["key"] == "export_refused"][0]
+        self.assertEqual(f["items"], ["sb_rules: needs the 'Socket Bypass' permission"])
+        import preflight_report as pr
+        self.assertIn("Socket Bypass", pr.guide(f)["steps"][0])
+        # When the live read already reports Socket Bypass as unreadable, it isn't listed twice.
+        src_denied = tenant(policies={"socketBypass": {"error": "Access denied: Insufficient privileges"}})
+        rep = pc.Report()
+        pc.check_permissions(rep, exp, src_denied, tenant(policies={}))
+        self.assertEqual([x["key"] for x in rep.findings if x["key"] in ("perm_source", "export_refused")], ["perm_source"])

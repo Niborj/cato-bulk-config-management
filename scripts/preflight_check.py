@@ -116,6 +116,14 @@ POLICY_PERMISSION = {
     "siteWebProxy": "Site Web Proxy", "antiMalwareFileHash": "Anti Malware", "terminalServer": "User Awareness",
 }
 _DENIED = re.compile(r"access denied|insufficient privileges|permission", re.I)
+# catocli export type -> policy family, for naming the permission a refused export type needs.
+EXPORT_TYPE_FAMILY = {
+    "if_rules": "internetFirewall", "wf_rules": "wanFirewall", "wnw_rules": "wanNetwork", "apc_rules": "applicationControl",
+    "atr_rules": "appTenantRestriction", "tls_rules": "tlsInspect", "sb_rules": "socketBypass", "lan_fw_rules": "socketLan",
+    "cc_rules": "clientConnectivity", "pa_rules": "privateAccess", "st_rules": "splitTunnel", "ao_rules": "ztnaAlwaysOn",
+    "dia_rules": "dynamicIpAllocation", "ssia_rules": "sdpStaticIpAllocation", "rpf_rules": "remotePortFwd",
+    "swp_rules": "siteWebProxy", "amfh_rules": "antiMalwareFileHash", "ts_rules": "terminalServer",
+}
 
 # Export files the bulk folders read (catocli export all + static hosts + webhooks).
 EXPECTED_EXPORT_FILES = [
@@ -308,6 +316,7 @@ def load_export(config_dir):
     e["webhooks"] = _load(os.path.join(config_dir, "webhooks.json"), []) or []
     e["groups"] = _load(os.path.join(config_dir, "groups.json"), []) or []
     e["custom_apps"] = _load(os.path.join(config_dir, "custom_applications.json"), []) or []
+    e["export_report"] = _load(os.path.join(config_dir, "export_report.json"), None)  # from export_source.py
     return e
 
 
@@ -588,6 +597,28 @@ def check_permissions(rep, exp, src, tgt):
                          "Use a key from an admin whose role can edit the whole account (the predefined Editor role), or "
                          "add these permissions to the key's role in the CMA. A key that can't read a policy can't "
                          "deploy it either."))
+    # export_source.py's record of what the export was refused or failed on (it carries on past refusals).
+    report = exp.get("export_report") or {}
+    live_denied = {f for f, info in (src.get("policies") or {}).items() if "error" in info and _DENIED.search(info["error"])}
+    refused = [r for r in report.get("refused") or [] if EXPORT_TYPE_FAMILY.get(r.get("type")) not in live_denied]
+    if refused:
+        def _need(t):
+            perm = POLICY_PERMISSION.get(EXPORT_TYPE_FAMILY.get(t))
+            return f"needs the '{perm}' permission" if perm else "refused for lack of permission"
+        perms = sorted({POLICY_PERMISSION[EXPORT_TYPE_FAMILY[r["type"]]] for r in refused if r["type"] in EXPORT_TYPE_FAMILY})
+        rep.add(cat, "BLOCKER", "export_refused", {"n": len(refused), "types": [r["type"] for r in refused],
+                                                   "permissions": perms},
+                f"The export was refused {_pl(len(refused), 'type')} for lack of permission, so "
+                f"{'it is' if len(refused) == 1 else 'they are'} missing from it",
+                items=[f"{r['type']}: {_need(r['type'])}" for r in refused],
+                detail=(report.get("refused") or [{}])[0].get("error", "")[:200],
+                fix="Add the permissions to the source key's admin role (or use a key from an admin whose role can "
+                    "view the whole account), then run scripts/export_source.py again.")
+    if report.get("failed"):
+        rep.add("export", "BLOCKER", "export_failed", {"n": len(report["failed"])},
+                f"{_pl(len(report['failed']), 'export step')} failed",
+                items=[f"{f.get('type')}: {str(f.get('error', ''))[:120]}" for f in report["failed"]],
+                fix="Fix the cause in the error, then run scripts/export_source.py again.")
     readable = {f: info for f, info in (src.get("policies") or {}).items() if "error" not in info}
     missing = sorted(f for f, info in readable.items() if info.get("rules") and f not in exp["policy_enabled"])
     if missing:
@@ -597,7 +628,7 @@ def check_permissions(rep, exp, src, tgt):
                 fix="Export again and check its summary says every type succeeded (it can stop part way). Without "
                     "these files the migration silently leaves the policies out.")
     if src.get("policies") and tgt.get("policies") and not any(
-            k in ("perm_source", "perm_target") for k in (f["key"] for f in rep.findings)):
+            k in ("perm_source", "perm_target", "export_refused") for k in (f["key"] for f in rep.findings)):
         rep.add(cat, "OK", "perm_ok", {}, "Both API keys can read every policy")
 
 

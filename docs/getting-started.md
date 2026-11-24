@@ -15,8 +15,8 @@ A Cato-branded, one-page copy to print or send: [getting-started-guide.pdf](gett
 Create each key in that account's Cato Management Application (CMA) under
 Resources > API Keys (Admin API Keys in newer versions), signed in as an admin
 whose role covers the whole account (Viewer or Editor), and copy it at once:
-it's shown only once. A narrower role can't read every policy: the export then
-stops with "Access denied" and names the permission the role is missing. Note
+it's shown only once. A narrower role can't read every policy: the export carries
+on without those, and the check names each permission the role is missing. Note
 each account number too: it's the number after `/account/` in the CMA's address bar.
 
 ## 2. Run the check
@@ -40,13 +40,10 @@ catocli configure set --profile source --cato-token 'CURRENT_KEY' --account-id C
 catocli configure set --profile target --cato-token 'NEW_KEY' --account-id NEW_NUMBER
 ```
 
-Export the current account (read-only, a few minutes):
+Export the current account (read-only, a few minutes; it carries on past anything the key isn't allowed to read):
 
 ```bash
-export CATO_PROFILE=source;
-catocli export all --strip-ids --no-account-suffix --output-directory config_data;
-catocli export static_hosts --site-type all -f json --output-directory config_data;
-python3 scripts/export_webhooks.py --profile source --config-dir config_data
+python3 scripts/export_source.py --profile source
 ```
 
 The check: the one to remember, and to run again after every fix:

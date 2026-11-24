@@ -204,6 +204,18 @@ schema on 2026-11-24:
 | LAN Layer 7 enforcement | no | no | Per-site setting, CMA only. |
 | IdP and SCIM app configuration | no | no | Only the users and groups it provisions are visible (`userImportType: SCIM`). |
 
+## Exporting the source
+
+`scripts/export_source.py --profile <source>` runs the whole source export:
+`catocli export all --strip-ids --no-account-suffix`, the static hosts on every
+site type, and the webhooks. catocli 3.3.0 abandons `export all` at the first
+type its key is refused ("Access denied", for example a role without the
+"Socket Bypass" permission); this script records that type, runs `export all`
+again for the types it skipped, and carries on. What was refused or failed goes
+into `config_data/export_report.json`, and the check reports it as
+`export_refused` (with the permission each type needs) or `export_failed`.
+Refusals the check also sees by reading the policy live are listed once.
+
 ## Leaving out what the target can't hold yet
 
 Every run also writes three files next to the report, built from whatever is
