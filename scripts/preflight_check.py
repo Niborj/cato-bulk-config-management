@@ -10,7 +10,7 @@ What it checks
   access      both tenants reachable, not the same account, plan type
   export      the source export is complete (types present, static hosts on
               every site type, no stripped-ids surprises)
-  licensing   public (allocated) IP capacity, ZTNA users, site licences,
+  licensing   public (allocated) IP capacity, ZTNA users, site licenses,
               add-on SKUs the source has and the target lacks
   pops        every PoP the source allocates IPs on (and rules pin) exists for
               the target (China and private PoPs need their own entitlement)
@@ -42,8 +42,10 @@ Usage
   python3 scripts/preflight_check.py ... --config-dir config_data --out-dir preflight --strict
 
 Exit code: 2 = at least one BLOCKER, 1 = ACTION items only (with --strict),
-0 = nothing that stops a migration. Reports land in --out-dir as
-preflight_report.md and preflight_report.json (gitignored: tenant data).
+0 = nothing that stops a migration. Reports land in --out-dir (gitignored:
+tenant data): preflight_report.md and .json for engineers, and
+preflight_report.html, a Cato-branded readiness report written for the
+customer (add --pdf for a PDF copy and --customer "Name" for the cover).
 """
 import argparse
 import copy
@@ -59,6 +61,7 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cato_profile import REPO_ROOT, get_profile, load_protected  # noqa: E402
+from preflight_report import html_to_pdf, render_customer_html  # noqa: E402
 
 DEFAULT_ENDPOINT = "https://api.catonetworks.com/api/v1/graphql2"
 SEVERITIES = ["BLOCKER", "ACTION", "WARN", "INFO", "OK"]
@@ -102,7 +105,7 @@ SKU_FEATURES = {
     "CATO_RBI": "Remote Browser Isolation", "CATO_IP_ADD": "allocated (public) IPs",
     "CATO_ZTNA_USERS": "ZTNA / SDP users", "CATO_THREAT_PREVENTION": "threat prevention",
     "CATO_THREAT_PREVENTION_ADV": "advanced threat prevention", "CATO_EPP": "endpoint protection",
-    "CATO_SITE": "site licences", "CATO_PB": "pooled bandwidth", "CATO_IOT_OT": "IoT/OT device attributes",
+    "CATO_SITE": "site licenses", "CATO_PB": "pooled bandwidth", "CATO_IOT_OT": "IoT/OT device attributes",
     "CATO_AGTP": "agentic threat prevention", "CATO_AI_SEC_U": "AI security (users)",
     "CATO_AI_SEC_APP_U": "AI security (applications)", "CATO_ASTS_SEC_1_5K": "assets security",
     "CATO_DATALAKE": "data lake / event retention", "CATO_DEM": "digital experience monitoring",
@@ -306,8 +309,9 @@ class Report:
     def __init__(self):
         self.findings = []
 
-    def add(self, category, severity, title, detail="", items=None, fix="", rules=None):
-        self.findings.append({"category": category, "severity": severity, "title": title,
+    def add(self, category, severity, key, ctx, title, detail="", items=None, fix="", rules=None):
+        """key: stable finding id the customer report phrases; ctx: the numbers/names it needs."""
+        self.findings.append({"category": category, "severity": severity, "key": key, "ctx": ctx or {}, "title": title,
                               "detail": detail, "items": items or [], "fix": fix,
                               "rules": sorted(set(rules or []))})
 
@@ -526,12 +530,12 @@ def run_probes(api, refs, export, log):
 def check_access(rep, src, tgt):
     cat = "access"
     sa, ta = src["account"], tgt["account"]
-    rep.add(cat, "INFO", f"Source: {sa.get('name')} ({src['account_id']}, {sa.get('plan')}); "
+    rep.add(cat, "INFO", "access_accounts", {}, f"Source: {sa.get('name')} ({src['account_id']}, {sa.get('plan')}); "
                          f"target: {ta.get('name')} ({tgt['account_id']}, {ta.get('plan')})")
     if src["account_id"] == tgt["account_id"]:
-        rep.add(cat, "BLOCKER", "Source and target are the same account", fix="Point --target-profile at the new tenant.")
+        rep.add(cat, "BLOCKER", "access_same_account", {}, "Source and target are the same account", fix="Point --target-profile at the new tenant.")
     if (ta.get("plan") or "").upper() == "TRIAL":
-        rep.add(cat, "WARN", "Target is a TRIAL account: it reports no licence or allocation data, so capacity "
+        rep.add(cat, "WARN", "access_trial", {}, "Target is a TRIAL account: it reports no license or allocation data, so capacity "
                              "checks below can only tell you what to ask for, not whether it is there",
                 fix="Confirm the numbers in CMA > Account > License (or with your Cato contact) before you start.")
 
@@ -539,22 +543,22 @@ def check_access(rep, src, tgt):
 def check_export(rep, exp, src):
     cat = "export"
     if exp["missing_files"]:
-        rep.add(cat, "BLOCKER", f"Source export in {exp['dir']} is incomplete", items=exp["missing_files"],
+        rep.add(cat, "BLOCKER", "export_incomplete", {"n": len(exp["missing_files"])}, f"Source export in {exp['dir']} is incomplete", items=exp["missing_files"],
                 fix="Re-run `catocli export all` (in two halves if it stops early, and check its summary: it can exit 0 "
                     "after a connection reset), then `catocli export static_hosts --site-type all` and "
                     "`scripts/export_webhooks.py`.")
     else:
-        rep.add(cat, "OK", f"Source export in {exp['dir']} has every file the bulk folders read "
+        rep.add(cat, "OK", "export_ok", {"rules": len(exp["rules"]), "policies": len(exp["policy_enabled"])}, f"Source export in {exp['dir']} has every file the bulk folders read "
                            f"({len(exp['rules'])} rules across {len(exp['policy_enabled'])} policies)")
     n_export, n_live = len(exp["static_hosts"]), src.get("host_total")
     if n_live is not None and n_export < n_live:
-        rep.add(cat, "BLOCKER", f"Static hosts: export has {n_export}, the source tenant has {n_live}",
+        rep.add(cat, "BLOCKER", "export_hosts_short", {"have": n_export, "need": n_live}, f"Static hosts: export has {n_export}, the source tenant has {n_live}",
                 detail="`export all` only exports hosts on physical sockets by default.",
                 fix="`catocli export static_hosts --site-type all -f json --output-directory <config dir>`")
     elif n_live is not None:
-        rep.add(cat, "OK", f"Static hosts: all {n_live} exported")
+        rep.add(cat, "OK", "export_hosts_ok", {"n": n_live}, f"Static hosts: all {n_live} exported")
     if not exp["rules"]:
-        rep.add(cat, "WARN", "No policy rules found in the export")
+        rep.add(cat, "WARN", "export_no_rules", {}, "No policy rules found in the export")
 
 
 def check_licensing(rep, exp, src, tgt):
@@ -564,49 +568,49 @@ def check_licensing(rep, exp, src, tgt):
     already = len(tgt["allocated_ips"])
     if need_ips:
         if not t_pub:
-            rep.add(cat, "ACTION", f"Allocated (public) IPs: the source uses {need_ips}; the target reports no "
-                                   f"public-IP licence data ({already} already allocated there)",
+            rep.add(cat, "ACTION", "lic_ips_unknown", {"need": need_ips}, f"Allocated (public) IPs: the source uses {need_ips}; the target reports no "
+                                   f"public-IP license data ({already} already allocated there)",
                     fix=f"Make sure the target may allocate at least {need_ips} IPs before you deploy "
                         "0-dependencies. A fresh trial allowed only 3 in our test, and every allocation past the cap "
                         "fails with 'You cannot allocate more IPs than allowed by your license'.")
         elif (t_pub.get("available") or 0) + already < need_ips:
-            rep.add(cat, "BLOCKER", f"Allocated (public) IPs: the source uses {need_ips}, the target has "
+            rep.add(cat, "BLOCKER", "lic_ips_short", {"need": need_ips, "total": t_pub.get("total")}, f"Allocated (public) IPs: the source uses {need_ips}, the target has "
                                     f"{t_pub.get('total')} licensed ({t_pub.get('available')} free)",
-                    fix=f"Raise the target's public IP licence to at least {need_ips}.")
+                    fix=f"Raise the target's public IP license to at least {need_ips}.")
         else:
-            rep.add(cat, "OK", f"Allocated (public) IPs: need {need_ips}, target has {t_pub.get('available')} free "
+            rep.add(cat, "OK", "lic_ips_ok", {"need": need_ips}, f"Allocated (public) IPs: need {need_ips}, target has {t_pub.get('available')} free "
                                f"of {t_pub.get('total')}")
     s_z = (src["allocations"] or {}).get("ztnaUsers") or {}
     t_z = (tgt["allocations"] or {}).get("ztnaUsers")
     if s_z.get("allocated"):
         if not t_z:
-            rep.add(cat, "ACTION", f"ZTNA users: {s_z['allocated']} allocated in the source; the target reports no "
-                                   "ZTNA user licence data", fix=f"Licence at least {s_z['allocated']} ZTNA users in the target.")
+            rep.add(cat, "ACTION", "lic_ztna_unknown", {"need": s_z["allocated"]}, f"ZTNA users: {s_z['allocated']} allocated in the source; the target reports no "
+                                   "ZTNA user license data", fix=f"License at least {s_z['allocated']} ZTNA users in the target.")
         elif (t_z.get("total") or 0) < s_z["allocated"]:
-            rep.add(cat, "BLOCKER", f"ZTNA users: source uses {s_z['allocated']}, target is licensed for {t_z.get('total')}",
-                    fix="Raise the target's ZTNA user licence.")
+            rep.add(cat, "BLOCKER", "lic_ztna_short", {"need": s_z["allocated"], "total": t_z.get("total")}, f"ZTNA users: source uses {s_z['allocated']}, target is licensed for {t_z.get('total')}",
+                    fix="Raise the target's ZTNA user license.")
         else:
-            rep.add(cat, "OK", f"ZTNA users: need {s_z['allocated']}, target licensed for {t_z.get('total')}")
+            rep.add(cat, "OK", "lic_ztna_ok", {"need": s_z["allocated"]}, f"ZTNA users: need {s_z['allocated']}, target licensed for {t_z.get('total')}")
     n_sites = len(exp["sites"])
     t_site_lic = [l for l in tgt["licenses"] if l.get("sku") in ("CATO_SITE", "CATO_SSE_SITE", "CATO_PB", "CATO_PB_SSE")]
     if n_sites:
         if not tgt["licenses"]:
-            rep.add(cat, "ACTION", f"Sites: the export holds {n_sites} sites; the target reports no site or pooled "
-                                   "bandwidth licences", fix=f"Make sure the target can hold {n_sites} sites "
-                                                             "(site licences or a pooled bandwidth licence).")
+            rep.add(cat, "ACTION", "lic_sites_unknown", {"need": n_sites}, f"Sites: the export holds {n_sites} sites; the target reports no site or pooled "
+                                   "bandwidth licenses", fix=f"Make sure the target can hold {n_sites} sites "
+                                                             "(site licenses or a pooled bandwidth license).")
         elif not t_site_lic:
-            rep.add(cat, "BLOCKER", f"Sites: {n_sites} to create, but the target has no site or pooled bandwidth licence")
+            rep.add(cat, "BLOCKER", "lic_sites_none", {"need": n_sites}, f"Sites: {n_sites} to create, but the target has no site or pooled bandwidth license")
         else:
-            rep.add(cat, "INFO", f"Sites: {n_sites} to create; target has {len(t_site_lic)} site/pooled licence record(s)")
+            rep.add(cat, "INFO", "lic_sites_info", {"need": n_sites}, f"Sites: {n_sites} to create; target has {len(t_site_lic)} site/pooled license record(s)")
     s_skus = {l["sku"] for l in src["licenses"] if l.get("status") in (None, "ACTIVE")}
     t_skus = {l["sku"] for l in tgt["licenses"] if l.get("status") in (None, "ACTIVE")}
     missing = sorted(s_skus - t_skus)
     if missing and t_skus:
-        rep.add(cat, "WARN", f"{len(missing)} licence SKU(s) active in the source but not in the target",
+        rep.add(cat, "WARN", "lic_skus_missing", {"n": len(missing)}, f"{len(missing)} license SKU(s) active in the source but not in the target",
                 items=[f"{s} ({SKU_FEATURES.get(s, 'add-on')})" for s in missing],
                 fix="Rules and settings that rely on these features may be rejected or behave differently.")
     elif missing:
-        rep.add(cat, "ACTION", "Add-ons to match in the target (it reports no licences to compare)",
+        rep.add(cat, "ACTION", "lic_skus_unknown", {"n": len(missing)}, "Add-ons to match in the target (it reports no licenses to compare)",
                 items=[f"{s} ({SKU_FEATURES.get(s, 'add-on')})" for s in missing])
 
 
@@ -641,12 +645,12 @@ def check_pops(rep, exp, src, tgt, refs):
     for p in missing:
         dep_rules |= set(refs.get("popLocation", {}).get(p, []))
     if missing:
-        rep.add(cat, "BLOCKER", f"{len(missing)} PoP location(s) the source uses are not available to the target",
-                items=[f"{p}: {len(u)} dependant(s), e.g. {u[0]}" for p, u in sorted(missing.items())],
+        rep.add(cat, "BLOCKER", "pop_missing", {"n": len(missing), "names": sorted(missing)}, f"{len(missing)} PoP location(s) the source uses are not available to the target",
+                items=[f"{p}: used by {len(u)} item{'s' if len(u) != 1 else ''}, e.g. {u[0]}" for p, u in sorted(missing.items())],
                 fix="China and private PoPs need their own entitlement. Get it added, or leave these allocations and "
                     "the sites/rules on them out with `allocated_ips_exclude` / `ipsec_sites_exclude` "
                     "(and scripts/scope_policies_to_target.py).", rules=dep_rules)
-    rep.add(cat, "OK" if not missing else "INFO",
+    rep.add(cat, "OK" if not missing else "INFO", "pop_summary", {"ok": len(needed) - len(missing), "n": len(needed)},
             f"{len(needed) - len(missing)} of {len(needed)} PoP locations used by the source are available to the target")
 
 
@@ -692,41 +696,41 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
                          "Tidy the rules in the source, or leave them out of the run.",
     }
     for itype in sorted(by_type):
-        rep.add(cat, "BLOCKER", f"{len(by_type[itype])} {itype} identities the rules name are missing in the target",
+        rep.add(cat, "BLOCKER", "id_missing", {"type": itype, "n": len(by_type[itype])}, f"{len(by_type[itype])} {itype} identities the rules name are missing in the target",
                 items=by_type[itype], fix=fixes.get(itype, ""), rules=type_rules[itype])
     total_refs = len(refs.get("usersGroup", {})) + len(refs.get("user", {}))
     if total_refs and not by_type:
-        rep.add(cat, "OK", f"All {total_refs} users and user groups the rules name exist in the target")
+        rep.add(cat, "OK", "id_ok", {"n": total_refs}, f"All {total_refs} users and user groups the rules name exist in the target")
     if missing_rules:
-        rep.add(cat, "INFO", f"{len(missing_rules)} rules name at least one missing identity and will fail until it exists")
+        rep.add(cat, "INFO", "id_rules", {"n": len(missing_rules)}, f"{len(missing_rules)} rules name at least one missing identity and will fail until it exists")
 
     s_types = Counter(u.get("userImportType") for u in src["users"])
     t_types = Counter(u.get("userImportType") for u in tgt["users"])
     s_dirs = {u.get("directoryId") for u in src["users"] if u.get("directoryId")}
-    rep.add(cat, "INFO", f"Source directory: {len(src['users'])} users ({dict(s_types)}), "
+    rep.add(cat, "INFO", "id_source_dir", {}, f"Source directory: {len(src['users'])} users ({dict(s_types)}), "
                          f"{len(src['user_groups'])} user groups, {len(s_dirs)} directory id(s)")
-    rep.add(cat, "INFO", f"Target directory: {len(tgt['users'])} users ({dict(t_types)}), {len(tgt['user_groups'])} user groups")
+    rep.add(cat, "INFO", "id_target_dir", {}, f"Target directory: {len(tgt['users'])} users ({dict(t_types)}), {len(tgt['user_groups'])} user groups")
     if s_types.get("SCIM") and not t_types.get("SCIM"):
-        rep.add(cat, "ACTION", "The source provisions users over SCIM; the target has no SCIM-provisioned users yet",
+        rep.add(cat, "ACTION", "id_scim_inactive", {}, "The source provisions users over SCIM; the target has no SCIM-provisioned users yet",
                 detail="Either no SCIM integration exists in the target or it has not synced. The API cannot read the "
                        "IdP/SCIM configuration itself, so this is inferred from the user list.",
                 fix="Create the SCIM app in the target, point the IdP (Entra ID, Okta, ...) at it, assign the groups "
                     "the rules use and run a sync before the policies.")
     if s_types.get("LDAP") and not t_types.get("LDAP"):
-        rep.add(cat, "ACTION", "The source imports users from LDAP/AD; the target has none",
+        rep.add(cat, "ACTION", "id_ldap_inactive", {}, "The source imports users from LDAP/AD; the target has none",
                 fix="Connect the target to the directory and sync before the policies.")
 
     if target_api.scim_url and target_api._scim_token:
         try:
             st_u, body_u = target_api.scim_get("/Users?count=1")
             st_g, body_g = target_api.scim_get("/Groups?count=1")
-            rep.add(cat, "OK", f"Target SCIM endpoint answers (Users {st_u}: {body_u.get('totalResults')} total, "
+            rep.add(cat, "OK", "id_scim_endpoint_ok", {}, f"Target SCIM endpoint answers (Users {st_u}: {body_u.get('totalResults')} total, "
                                f"Groups {st_g}: {body_g.get('totalResults')} total)")
         except Exception as e:  # noqa: BLE001 - report any failure as a finding
-            rep.add(cat, "BLOCKER", "Target SCIM endpoint in the profile does not answer", detail=str(e)[:300],
+            rep.add(cat, "BLOCKER", "id_scim_endpoint_fail", {}, "Target SCIM endpoint in the profile does not answer", detail=str(e)[:300],
                     fix="Check scim_url and scim_token in the target profile (Directory Services > SCIM in the CMA).")
     else:
-        rep.add(cat, "INFO", "No scim_url/scim_token in the target profile, so the SCIM endpoint was not tested",
+        rep.add(cat, "INFO", "id_scim_not_tested", {}, "No scim_url/scim_token in the target profile, so the SCIM endpoint was not tested",
                 fix="Add both to the profile in ~/.cato/credentials to validate the SCIM app (and to use scim_sync.py).")
 
 
@@ -744,18 +748,18 @@ def check_cma_only(rep, refs, probes):
             missing = sorted(n for n, (st, _) in states.items() if st == "MISSING")
             unknown = sorted(n for n, (st, _) in states.items() if st not in ("MISSING", "PRESENT"))
             if missing:
-                rep.add(cat, "BLOCKER", f"{len(missing)} {noun(len(missing))} missing in the target (verified by probe)",
+                rep.add(cat, "BLOCKER", "cma_missing", {"kind": kind, "n": len(missing), "one": one, "many": many}, f"{len(missing)} {noun(len(missing))} missing in the target (verified by probe)",
                         items=[f"{n}: {_uses(refs, kind, n)}" for n in missing], rules=_rules_for(refs, kind, missing),
                         fix="Create them in the target CMA with exactly the same names. The API cannot create or list them.")
             if unknown:
-                rep.add(cat, "WARN", f"{len(unknown)} {noun(len(unknown))} the probe could not decide",
+                rep.add(cat, "WARN", "cma_undecided", {"kind": kind, "n": len(unknown), "one": one, "many": many}, f"{len(unknown)} {noun(len(unknown))} the probe could not decide",
                         items=[f"{n}: {states[n][1][:160]}" for n in unknown], rules=_rules_for(refs, kind, unknown))
             present = len(names) - len(missing) - len(unknown)
             if present:
-                rep.add(cat, "OK", f"{present} {noun(present)} the rules use already exist in the target",
+                rep.add(cat, "OK", "cma_present", {"kind": kind, "n": present, "one": one, "many": many}, f"{present} {noun(present)} the rules use already exist in the target",
                         items=sorted(n for n, (st, _) in states.items() if st == "PRESENT"))
         else:
-            rep.add(cat, "ACTION", f"{len(names)} {noun(len(names))} the rules use must exist in the target "
+            rep.add(cat, "ACTION", "cma_unverified", {"kind": kind, "n": len(names), "one": one, "many": many}, f"{len(names)} {noun(len(names))} the rules use must exist in the target "
                                    "(the API cannot list them; rerun with --probe to verify)",
                     items=[f"{n}: {_uses(refs, kind, n)}" for n in sorted(names)], rules=_rules_for(refs, kind, names),
                     fix="Create them in the target CMA with exactly the same names before the policies.")
@@ -767,25 +771,25 @@ def check_features(rep, exp, refs, probes):
     if rbi_rules:
         state = ((probes or {}).get("features") or {}).get("rbi")
         if state and state[0] == "DISABLED":
-            rep.add(cat, "BLOCKER", "Remote Browser Isolation is disabled in the target (verified by probe)",
-                    items=rbi_rules, rules=rbi_rules, fix="Enable RBI on the target (licence/feature) before the Internet Firewall.")
+            rep.add(cat, "BLOCKER", "feat_rbi_disabled", {"n": len(rbi_rules)}, "Remote Browser Isolation is disabled in the target (verified by probe)",
+                    items=rbi_rules, rules=rbi_rules, fix="Enable RBI on the target (license/feature) before the Internet Firewall.")
         elif state and state[0] == "ENABLED":
-            rep.add(cat, "OK", f"Remote Browser Isolation is enabled in the target ({len(rbi_rules)} rule(s) use it)")
+            rep.add(cat, "OK", "feat_rbi_ok", {"n": len(rbi_rules)}, f"Remote Browser Isolation is enabled in the target ({len(rbi_rules)} rule(s) use it)")
         else:
-            rep.add(cat, "ACTION", f"{len(rbi_rules)} rule(s) use the RBI action: RBI must be enabled in the target",
+            rep.add(cat, "ACTION", "feat_rbi_unverified", {"n": len(rbi_rules)}, f"{len(rbi_rules)} rule(s) use the RBI action: RBI must be enabled in the target",
                     items=rbi_rules, rules=rbi_rules, fix="Enable RBI, or rerun with --probe to verify.")
     swp_rules = [f'{r["family"]}: {r["name"]}' for r in exp["rules"] if r["family"] == "siteWebProxy"]
     if swp_rules:
         state = ((probes or {}).get("features") or {}).get("swp")
         if state and state[0] == "ENABLED":
-            rep.add(cat, "OK", "Site Web Proxy rules can be created in the target")
+            rep.add(cat, "OK", "feat_swp_ok", {}, "Site Web Proxy rules can be created in the target")
         elif state:
-            rep.add(cat, "BLOCKER", "Site Web Proxy rules cannot be created in the target (verified by probe)",
+            rep.add(cat, "BLOCKER", "feat_swp_fail", {"n": len(swp_rules)}, "Site Web Proxy rules cannot be created in the target (verified by probe)",
                     detail=state[1][:300], items=swp_rules, rules=swp_rules,
                     fix="Ask Cato to enable Site Web Proxy for the target account. 'Unsupported field [addRule]' with "
                         "path ...rule.transportProtocol comes from the API itself, not from Terraform.")
         else:
-            rep.add(cat, "ACTION", f"{len(swp_rules)} Site Web Proxy rule(s): the feature must be enabled in the target",
+            rep.add(cat, "ACTION", "feat_swp_unverified", {"n": len(swp_rules)}, f"{len(swp_rules)} Site Web Proxy rule(s): the feature must be enabled in the target",
                     items=swp_rules, rules=swp_rules, fix="Enable Site Web Proxy, or rerun with --probe to verify.")
 
     translated = []
@@ -799,11 +803,11 @@ def check_features(rep, exp, refs, probes):
                 if ts and sn and ts != sn:
                     translated.append(f'{s["name"]} / {r.get("name")}: {sn} -> {ts}')
     if translated:
-        rep.add(cat, "ACTION", f"{len(translated)} network range(s) use real Static Range Translation",
+        rep.add(cat, "ACTION", "feat_srt", {"n": len(translated)}, f"{len(translated)} network range(s) use real Static Range Translation",
                 items=translated, fix="Enable Static Range Translation in the target (Resources > System Settings). "
                                       "The API cannot read or set it.")
     else:
-        rep.add(cat, "OK", "No real Static Range Translation in the source (identity translations are skipped "
+        rep.add(cat, "OK", "feat_srt_ok", {}, "No real Static Range Translation in the source (identity translations are skipped "
                            "by the sites module)")
 
     l7, l7_rules = [], []
@@ -820,7 +824,7 @@ def check_features(rep, exp, refs, probes):
             l7.append(f'{r["name"]} (sites: {", ".join(sites) or "every site the network rule covers"})')
             l7_rules.append(f'{r["family"]}: {r["name"]}')
     if l7:
-        rep.add(cat, "ACTION", f"{len(l7)} LAN firewall rule(s) match on applications or services (Layer 7)",
+        rep.add(cat, "ACTION", "feat_l7", {"n": len(l7), "sites": sorted({x.rsplit("(sites: ", 1)[-1].rstrip(")") for x in l7})}, f"{len(l7)} LAN firewall rule(s) match on applications or services (Layer 7)",
                 items=l7, rules=l7_rules,
                 fix="Turn on LAN Layer 7 enforcement for those sites in the target CMA after the sites exist, or the "
                     "LAN firewall cannot publish ('Can't use L7 with sites that don't have L7 enforcement enabled'). "
@@ -828,7 +832,7 @@ def check_features(rep, exp, refs, probes):
 
     waf = [g for g in exp["global_ip_ranges"] if "169.254.169.254" in json.dumps(g)]
     if waf:
-        rep.add(cat, "BLOCKER", "Global IP range(s) containing 169.254.169.254: the API's web firewall rejects any "
+        rep.add(cat, "BLOCKER", "feat_waf_range", {"n": len(waf), "names": [g.get("name") for g in waf]}, "Global IP range(s) containing 169.254.169.254: the API's web firewall rejects any "
                                 "request that carries this address", items=[g.get("name") for g in waf],
                 fix="Create them by hand in the target CMA, then keep their names in `global_ip_ranges_exclude` "
                     "(0-dependencies manages ALL global ranges and would otherwise try to recreate them).")
@@ -839,15 +843,15 @@ def check_features(rep, exp, refs, probes):
             if ((w.get("security") or {}).get("mode") or "OPEN") != "OPEN":
                 wifi.append(f'{s["name"]}:{w.get("name")}')
     if wifi:
-        rep.add(cat, "ACTION", f"{len(wifi)} Wi-Fi SSID(s) need their passwords (exports carry CHANGE_ME)",
+        rep.add(cat, "ACTION", "feat_wifi", {"n": len(wifi)}, f"{len(wifi)} Wi-Fi SSID(s) need their passwords (exports carry CHANGE_ME)",
                 items=wifi, fix="Put them in `wifi_ssid_passkeys` in a gitignored 1-sites/*.auto.tfvars.")
     if exp["webhooks"]:
-        rep.add(cat, "WARN", f"{len(exp['webhooks'])} webhook(s) copy across pointing at the source's real endpoints",
+        rep.add(cat, "WARN", "feat_webhooks", {"n": len(exp["webhooks"])}, f"{len(exp['webhooks'])} webhook(s) copy across pointing at the source's real endpoints",
                 items=[f'{w.get("name")}: {w.get("url", "")[:60]}' for w in exp["webhooks"]],
                 fix="In a test tenant, disable or repoint them; set real secrets via `webhook_secrets`.")
     ipsec = [s["name"] for s in exp["sites"].values() if s["_kind"] == "ipsec"]
     if ipsec:
-        rep.add(cat, "INFO", f"{len(ipsec)} IPSec site(s): tunnels and pre-shared keys are not exported", items=ipsec,
+        rep.add(cat, "INFO", "feat_ipsec", {"n": len(ipsec)}, f"{len(ipsec)} IPSec site(s): tunnels and pre-shared keys are not exported", items=ipsec,
                 fix="Add tunnels and PSKs after the sites exist.")
 
 
@@ -858,10 +862,10 @@ def check_integrity(rep, exp, src, refs):
     done = sorted(n for n in classic_all if n in converted)
     classic = {n: r for n, r in classic_all.items() if n not in converted}
     if done:
-        rep.add(cat, "OK", f"{len(done)} classic group(s) the API cannot see are already in groups.json as Advanced Groups",
+        rep.add(cat, "OK", "int_classic_done", {"n": len(done)}, f"{len(done)} classic group(s) the API cannot see are already in groups.json as Advanced Groups",
                 items=done)
     if classic:
-        rep.add(cat, "ACTION", f"{len(classic)} group(s) the rules use are invisible to the groups API (classic groups)",
+        rep.add(cat, "ACTION", "int_classic", {"n": len(classic)}, f"{len(classic)} group(s) the rules use are invisible to the groups API (classic groups)",
                 items=[f"{n}: {len(r)} rule(s)" for n, r in sorted(classic.items())], rules=_rules_for(refs, "group", classic),
                 fix="Read their members in the source CMA and add them to config_data/groups.json as Advanced Groups "
                     "(keep empty ones empty: an empty group matches nothing; dropping it from a rule matches everything).")
@@ -889,12 +893,12 @@ def check_integrity(rep, exp, src, refs):
             if n not in an:
                 stale[f"allocated IP '{n}'"].update(rules)
     if stale:
-        rep.add(cat, "WARN", f"{len(stale)} reference(s) point at objects that are not in the source export",
+        rep.add(cat, "WARN", "int_stale", {"n": len(stale)}, f"{len(stale)} reference(s) point at objects that are not in the source export",
                 items=[f"{k}: {len(v)} rule(s), e.g. {sorted(v)[0]}" for k, v in sorted(stale.items())],
                 rules=set().union(*stale.values()),
                 fix="Usually leftovers in the source (deleted sites/ranges). Tidy them there, or leave the rules out.")
     else:
-        rep.add(cat, "OK", "Every site, range, custom app and allocated IP the rules name is in the export")
+        rep.add(cat, "OK", "int_ok", {}, "Every site, range, custom app and allocated IP the rules name is in the export")
 
 
 def check_target_state(rep, exp, tgt):
@@ -906,7 +910,7 @@ def check_target_state(rep, exp, tgt):
     clashes, existing = [], []
     for fam, info in tgt["policies"].items():
         if "error" in info:
-            rep.add(cat, "WARN", f"Could not read the target's {fam} policy", detail=info["error"][:200])
+            rep.add(cat, "WARN", "tgt_unreadable", {"family": fam}, f"Could not read the target's {fam} policy", detail=info["error"][:200])
             continue
         names = set(info["rules"])
         if names:
@@ -915,29 +919,29 @@ def check_target_state(rep, exp, tgt):
         if both:
             clashes.append(f"{fam}: {len(both)} ({', '.join(both[:3])}{', ...' if len(both) > 3 else ''})")
     if clashes:
-        rep.add(cat, "ACTION", "Rules already in the target share names with source rules "
+        rep.add(cat, "ACTION", "tgt_clash", {"n": sum(int(c.split(": ", 1)[1].split(" ")[0]) for c in clashes)}, "Rules already in the target share names with source rules "
                                "(factory/sample rules, or a previous run)",
                 items=clashes, fix="New tenant: review, then clear them with `scripts/purge_all.py --profile <target> "
                                    "--only <families>` (dry run by default; --execute deletes). Re-run of an earlier "
                                    "migration: leave them, Terraform state already owns them.")
     if existing and not clashes:
-        rep.add(cat, "WARN", "The target already has rules (no name clashes)", items=existing)
+        rep.add(cat, "WARN", "tgt_rules_existing", {}, "The target already has rules (no name clashes)", items=existing)
     elif existing:
-        rep.add(cat, "INFO", "Rules already in the target", items=existing)
+        rep.add(cat, "INFO", "tgt_rules_info", {}, "Rules already in the target", items=existing)
     for label, have in (("sites", tgt["sites"]), ("groups", tgt["groups"])):
         both = sorted(have & (set(exp["sites"]) if label == "sites" else {g.get("name") for g in exp["groups"]}))
         if both:
-            rep.add(cat, "WARN", f"{len(both)} {label} with source names already exist in the target",
+            rep.add(cat, "WARN", "tgt_existing_named", {"label": label, "n": len(both)}, f"{len(both)} {label} with source names already exist in the target",
                     items=both, fix="A greenfield run expects them absent: import them (brownfield) or remove them first.")
         elif have:
-            rep.add(cat, "INFO", f"Target already has {len(have)} {label} (no name clashes)")
+            rep.add(cat, "INFO", "tgt_existing_info", {"label": label, "n": len(have)}, f"Target already has {len(have)} {label} (no name clashes)")
     if tgt["allocated_ips"]:
-        rep.add(cat, "INFO", f"Target already has {len(tgt['allocated_ips'])} allocated IP(s); they count against the cap")
+        rep.add(cat, "INFO", "tgt_allocated", {"n": len(tgt["allocated_ips"])}, f"Target already has {len(tgt['allocated_ips'])} allocated IP(s); they count against the cap")
     diffs = [f"{fam}: source {'on' if on else 'off'}, target {'on' if tgt['policies'][fam].get('enabled') else 'off'}"
              for fam, on in sorted(exp["policy_enabled"].items())
              if fam in tgt["policies"] and "error" not in tgt["policies"][fam] and tgt["policies"][fam].get("enabled") != on]
     if diffs:
-        rep.add(cat, "INFO", f"{len(diffs)} policy on/off switch(es) differ today (the policy folders set them to match)",
+        rep.add(cat, "INFO", "tgt_toggles", {"n": len(diffs)}, f"{len(diffs)} policy on/off switch(es) differ today (the policy folders set them to match)",
                 items=diffs)
 
 
@@ -1030,6 +1034,10 @@ def main():
     ap.add_argument("--probe", action="store_true",
                     help="verify non-listable objects/features in a discarded draft revision on the target (needs edit rights)")
     ap.add_argument("--out-dir", default=os.path.join(REPO_ROOT, "preflight"), help="where to write the reports")
+    ap.add_argument("--customer", default=None,
+                    help="customer name for the cover of the branded report (default: the target account name)")
+    ap.add_argument("--pdf", action="store_true",
+                    help="also print the branded report to preflight_report.pdf (needs a local Chrome, Chromium or Edge)")
     ap.add_argument("--strict", action="store_true", help="exit 1 when ACTION items remain (CI use)")
     ap.add_argument("--quiet", action="store_true", help="print only the summary")
     args = ap.parse_args()
@@ -1068,12 +1076,13 @@ def main():
     check_integrity(rep, exp, src, refs)
     check_target_state(rep, exp, tgt)
     if probes and probes.get("error"):
-        rep.add("access", "WARN", "Probes could not run", detail=probes["error"][:300],
+        rep.add("access", "WARN", "probe_failed", {}, "Probes could not run", detail=probes["error"][:300],
                 fix="--probe needs a target key with edit rights on the policies.")
     if probes and probes.get("warning"):
-        rep.add("access", "WARN", "A probe baseline failed, so probe results may be unreliable", detail=probes["warning"][:300])
+        rep.add("access", "WARN", "probe_baseline", {}, "A probe baseline failed, so probe results may be unreliable", detail=probes["warning"][:300])
 
     meta = {"source": f"{src['account'].get('name')} ({src_api.account})",
+            "target_name": tgt["account"].get("name"),
             "target": f"{tgt['account'].get('name')} ({tgt_api.account})", "probe": args.probe,
             "when": time.strftime("%Y-%m-%d %H:%M %Z"), "revisions": (probes or {}).get("revisions", [])}
     text = render_text(rep, exp, meta)
@@ -1088,7 +1097,17 @@ def main():
         json.dump({"meta": meta, "counts": rep.counts(), "rules_total": len(exp["rules"]),
                    "rules_blocked": blocked_rule_count(rep),
                    "rules_blocked_or_at_risk": blocked_rule_count(rep, ("BLOCKER", "ACTION")), "findings": rep.findings}, fh, indent=1, default=list)
-    log(f"reports written to {args.out_dir}/preflight_report.md and .json")
+    html_path = os.path.join(args.out_dir, "preflight_report.html")
+    with open(html_path, "w") as fh:
+        fh.write(render_customer_html(rep, exp, meta, customer=args.customer))
+    written = ["preflight_report.md", "preflight_report.json", "preflight_report.html"]
+    if args.pdf:
+        err = html_to_pdf(html_path, os.path.join(args.out_dir, "preflight_report.pdf"))
+        if err:
+            log(f"PDF not written: {err}")
+        else:
+            written.append("preflight_report.pdf")
+    log(f"reports written to {args.out_dir}: {', '.join(written)}")
     c = rep.counts()
     if c["BLOCKER"]:
         return 2

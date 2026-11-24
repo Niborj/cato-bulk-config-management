@@ -167,5 +167,68 @@ class ScimEndpoint(unittest.TestCase):
         self.assertEqual(self._run(self._serve(200), "bad-token")["severity"], "BLOCKER")
 
 
+class CustomerReport(unittest.TestCase):
+    """The Cato-branded report written for the customer."""
+
+    def setUp(self):
+        import preflight_report as pr
+        self.pr = pr
+
+    def test_every_actionable_key_has_customer_wording(self):
+        import re
+        src = open(pc.__file__).read()
+        keys = set(re.findall(r'rep\.add\((?:cat|"access"), "(?:BLOCKER|ACTION|WARN)", "([a-z0-9_]+)"', src))
+        self.assertGreater(len(keys), 30)
+        ctx = {"n": 2, "need": 19, "total": 3, "have": 15, "type": "SCIM", "names": ["Shanghai_DC2"], "kind": "device",
+               "one": "device posture profile", "many": "device posture profiles", "sites": ["Branch-1"], "label": "sites",
+               "family": "internetFirewall"}
+        owners = {o[0] for o in self.pr.OWNERS}
+        generic = {"probe_failed", "probe_baseline", "tgt_unreadable", "tgt_rules_existing"}
+        for k in sorted(keys - generic):
+            g = self.pr.guide({"key": k, "ctx": ctx, "rules": ["a: b"], "title": "ENGINEERING TITLE", "detail": ""})
+            self.assertIn(g["owner"], owners, k)
+            self.assertNotEqual(g["title"], "ENGINEERING TITLE", f"{k} has no customer wording")
+            self.assertTrue(g["why"], k)
+
+    def test_identity_owner_depends_on_import_type(self):
+        f = {"key": "id_missing", "rules": [], "title": "", "detail": ""}
+        self.assertEqual(self.pr.guide(dict(f, ctx={"type": "SCIM", "n": 3}))["owner"], "identity")
+        self.assertEqual(self.pr.guide(dict(f, ctx={"type": "MANUAL", "n": 3}))["owner"], "cma_admin")
+
+    def test_friendly_text(self):
+        fr = self.pr._friendly
+        self.assertEqual(fr("internetFirewall: RBI Check Apps"), "Internet Firewall: RBI Check Apps")
+        self.assertEqual(fr("user group 'X' (1 rule(s))"), "user group 'X' (1 rule)")
+        self.assertEqual(fr("CATO_RBI (Remote Browser Isolation)", "lic_skus_unknown"), "Remote Browser Isolation (CATO_RBI)")
+
+    def test_render_has_brand_and_plan(self):
+        rep = pc.Report()
+        rep.add("pops", "BLOCKER", "pop_missing", {"n": 1, "names": ["Shanghai_DC2"]}, "x",
+                items=["Shanghai_DC2: used by 1 item"], rules=["wanNetwork: Egress"])
+        rep.add("features", "ACTION", "feat_wifi", {"n": 1}, "y", items=["S1:Guest"])
+        rep.add("export", "OK", "export_ok", {"rules": 2, "policies": 1}, "z")
+        exp = export(rules=[rule("wanNetwork", "Egress"), rule("wanNetwork", "Other")])
+        meta = {"source": "Src (1)", "target": "Tgt (2)", "target_name": "Tgt", "when": "2026-11-24", "probe": True}
+        out = self.pr.render_customer_html(rep, exp, meta, customer="Example Co")
+        for needle in ("Migration readiness report", "Prepared for", "Example Co", "Your action plan",
+                       "Required before migration", "Already in place", "Appendix A", "@font-face",
+                       'class="cato-logo"', "<b>WAN Network</b>", "<span>Egress</span>",
+                       ">1</span>Make 1 PoP location available"):
+            self.assertTrue(needle in out, f"missing from report: {needle}")
+        self.assertTrue("50%" in out, "readiness gauge should read 50%")  # 1 of 2 rules ready
+
+    def test_modified_logo_is_left_out(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "cato_logo_rgb_white_art_101.svg"), "w") as fh:
+                fh.write("<svg/>")
+            old, self.pr.ASSETS = self.pr.ASSETS, d
+            try:
+                self.assertEqual(self.pr._logo("cato_logo_rgb_white_art_101.svg"), "")
+            finally:
+                self.pr.ASSETS = old
+        self.assertIn("data:image/svg+xml;base64", self.pr._logo("cato_logo_rgb_white_art_101.svg"))
+
+
 if __name__ == "__main__":
     unittest.main()

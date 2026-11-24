@@ -39,6 +39,8 @@ python3 scripts/bulk_apply.py --profile <target> --mode deploy --preflight-sourc
 | `--config-dir` | The source export (default `./config_data`). |
 | `--probe` | Verify non-listable objects and features on the target inside a draft revision that is discarded straight away. Needs edit rights on the target. Refused for a protected account. |
 | `--out-dir` | Where the reports go (default `./preflight`, gitignored). |
+| `--customer` | Customer name for the cover of the branded report. |
+| `--pdf` | Also print the branded report to PDF, using a local Chrome, Chromium or Edge (`CHROME_PATH` to point at one). |
 | `--strict` | Exit 1 when ACTION items remain, for CI. |
 | `--quiet` | Print only the summary lines. |
 
@@ -63,6 +65,38 @@ and the rest later.
 
 The console shows the first dozen items of each finding. The full lists are in
 `preflight/preflight_report.md` and, for scripts, `preflight/preflight_report.json`.
+
+## The customer report
+
+Every run also writes `preflight/preflight_report.html`: a Cato-branded readiness
+report written for the customer, not for engineers. It's one self-contained file
+(fonts and the official logo embedded), so it can be emailed as is, and it prints
+cleanly to A4 or Letter. `--pdf` saves a PDF copy alongside it.
+
+What it holds:
+
+- A cover with the readiness status, the two accounts and when the check ran.
+- A readiness gauge (the share of policy rules that can move as they are) and
+  the counts: required before migration, to do or confirm, to review, already in place.
+- **Your action plan**: every item numbered and grouped by who acts (your Cato
+  account team, Cato Support, your identity team, your Cato administrator, your
+  migration team), each with why it matters, what to do and the names involved,
+  with a box to tick.
+- **Already in place** and **What this check can't confirm for you**.
+- Appendix A: each affected policy rule once, with the numbered items it waits on.
+- Appendix B: the technical notes and commands for the migration engineers.
+
+The wording follows the Cato brand voice: plain US English, sentence-case
+headings, calm labels ("Required before migration" rather than "BLOCKER"), and
+approved product names. The look follows the Brand Hub: Cato Green leads, Coral
+and Sunflower only mark required and to-confirm items, Archivo and Inter type, and
+the flat Ring as the readiness gauge. The assets live in `scripts/report_assets/`
+(see its README); the logo files are checked against their published hashes and
+left out if they have been modified.
+
+To change what the report says about a finding, edit `guide()` in
+`scripts/preflight_report.py`. Each finding has a stable key (for example
+`pop_missing` or `cma_missing`), so the wording never depends on the console text.
 
 ## What it checks
 
