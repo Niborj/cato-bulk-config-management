@@ -515,10 +515,19 @@ def main():
                     "greenfield. Clear or set each folder's state aside first.")
 
     if not args.skip_validate:
-        log("gate: scripts/validate_config_data.py")
-        result = run([sys.executable, os.path.join(REPO_ROOT, "scripts", "validate_config_data.py"),
-                      "--config-data", config_dir],
-                     REPO_ROOT, os.environ.copy())
+        validate_cmd = [sys.executable, os.path.join(REPO_ROOT, "scripts", "validate_config_data.py"),
+                        "--config-data", config_dir]
+        # Greenfield target (non-source tenant, every selected migration.tf
+        # parked): no import block will run, so a --strip-ids export's missing
+        # source-tenant ids are expected, not errors. Without this the documented
+        # greenfield path (export all --strip-ids -> bulk_apply) fails its own
+        # validation gate with one "missing id" ERROR per object.
+        greenfield = (not is_source and not any(
+            os.path.exists(os.path.join(REPO_ROOT, f, "migration.tf")) for f in folders))
+        if greenfield:
+            validate_cmd.append("--greenfield")
+        log("gate: scripts/validate_config_data.py" + (" --greenfield" if greenfield else ""))
+        result = run(validate_cmd, REPO_ROOT, os.environ.copy())
         if result.returncode != 0:
             log("ABORT: config_data validation failed (ERROR severity). Fix exports first.")
             return 1
