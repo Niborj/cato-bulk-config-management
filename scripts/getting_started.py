@@ -142,7 +142,7 @@ single quotes around each key, and paste each block in turn.</p>
 </div>
 </div></section>
 </main>
-<footer>{_logo('cato_logo_rgb_color_art_101.svg')}<div>Part of cato-bulk-config-management. Every finding is explained in
+<footer>{_logo('cato_logo_rgb_color_art_101.svg')}<div>Every finding is explained in
 <span class="inl">docs/preflight-check.md</span>, and Appendix B of the report has the technical notes.</div></footer>
 </div>{COPY_JS}</body></html>"""
 
