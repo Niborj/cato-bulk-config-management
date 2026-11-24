@@ -477,8 +477,9 @@ width:230px;max-height:calc(100vh - 48px);overflow:auto;font-size:13px;line-heig
 .flabel{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--moss);padding:8px 14px 0}
 .cmd button{position:absolute;top:7px;right:8px;font:600 12px Inter,sans-serif;color:var(--pine);background:var(--hl);border:0;border-radius:6px;padding:4px 10px;cursor:pointer}
 .snote{font-size:13px;color:var(--mid);margin-top:4px}
-.copynote{font-size:13px;background:#fff2c6;color:#5c4500;border-radius:8px;padding:8px 12px}
-.copynote code{font:12px ui-monospace,Menlo,Consolas,monospace}
+.runs{margin:2px 0 6px;padding:6px 12px 8px;border-left:3px solid #dfe7e4;background:#fafcfb}
+.runs pre{margin:0;color:#3a3a3a;font:11.5px/1.45 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.runs .flabel{padding:0 0 3px}
 .sb code{font:12.5px ui-monospace,Menlo,Consolas,monospace;background:var(--pale);padding:1px 5px;border-radius:4px}
 footer{margin-top:48px;padding-top:16px;border-top:1px solid #e3e3e3;display:flex;gap:18px;align-items:center;font-size:12px;color:var(--mid)}
 footer img{height:20px;width:auto;flex:none}
@@ -488,7 +489,7 @@ footer img{height:20px;width:auto;flex:none}
 .summary{margin-top:22px;grid-template-columns:170px 1fr;gap:24px}.ring{width:160px;height:160px}
 .owner{margin-top:20px}.owner-head{margin-bottom:10px}.item{padding:10px 12px;margin-bottom:8px}
 .item ol{margin-top:2px}.names{font-size:11.5px;padding:6px 10px}.rules-by-policy{font-size:11px}
-.app-item{padding:7px 0}.code{font-size:11px}.cmd button{display:none}.cmd pre,.file pre{font-size:10.5px;padding-right:12px;white-space:pre-wrap}
+.app-item{padding:7px 0}.code{font-size:11px}.cmd button{display:none}.cmd pre,.file pre{font-size:10px;padding-right:12px;white-space:pre-wrap}
 .step{margin-bottom:10px}.phase{font-size:16px;margin-top:18px}
 .toc-side,.totop{display:none!important}.toc{margin-top:14px;padding:10px 16px}.toc li{margin:1px 0}
 a{text-decoration:none}}
@@ -568,7 +569,15 @@ def _q(s):
 
 
 def build_runbook(rep, meta):
-    """Phases of steps: {id, title, text, cmds, file, before (finding keys), note}. Empty without meta['run']."""
+    """Phases of steps for Part 2. Empty without meta['run'].
+
+    A step: {id, n, title, text, cmds, runs, sub, script, before (finding keys), file, note}.
+    `cmds` is what the reader pastes: short lines (at most CMD_LINE_MAX) that print whole, chained
+    with "&&" when there are several, so they paste the same whether a PDF viewer keeps line breaks
+    or turns them into spaces. A step that runs long commands gets a subcommand `sub` in the
+    generated migrate.sh (`script` = its body); `cmds` is then `sh <out>/migrate.sh <sub>` and
+    `runs` lists the full commands for reference.
+    """
     run = meta.get("run")
     if not run:
         return []
@@ -585,55 +594,67 @@ def build_runbook(rep, meta):
     def first(key):
         return fs[key][0] if key in fs else None
 
-    check = (f"python3 scripts/preflight_check.py --source-profile {_q(sp)} --target-profile {_q(tp)}"
-             + (" --probe" if run.get("probe") else "") + (" --lan-l7-confirmed" if run.get("lan_l7_confirmed") else "")
-             + " --pdf" + (f" --config-dir {_q(cfg)}" if cfg != "config_data" else "")
-             + (f" --out-dir {_q(out)}" if out != "preflight" else "")
+    common = ((f" --config-dir {_q(cfg)}" if cfg != "config_data" else "")
+              + (f" --out-dir {_q(out)}" if out != "preflight" else ""))
+    check_first = (f"python3 scripts/preflight_check.py --source-profile {_q(sp)} --target-profile {_q(tp)}"
+                   + (" --probe" if run.get("probe") else "") + common)
+    check = (check_first + (" --lan-l7-confirmed" if run.get("lan_l7_confirmed") else "") + " --pdf"
              + (f" --customer {_q(run['customer'])}" if run.get("customer") else ""))
+    check_l7 = check if run.get("lan_l7_confirmed") else check.replace(" --pdf", " --lan-l7-confirmed --pdf")
     deploy_all = f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} --keep-going"
     vexp = f"{out}/target_export"
+    script_path = f"{out}/migrate.sh"
+    leave_out = [("run", f"cp {_q(out + '/exclude-0-dependencies.auto.tfvars')} 0-dependencies/"),
+                 ("run", f"cp {_q(out + '/exclude-1-sites.auto.tfvars')} 1-sites/"),
+                 ("run", f"sh {_q(out + '/scope_command.sh')}")]
 
-    def step(sid, title, text, cmds=(), before=(), file=None, note=None):
-        return {"id": sid, "title": title, "text": text, "cmds": list(cmds), "before": [k for k in before if k in fs],
-                "file": file, "note": note}
+    def step(sid, title, text, cmds=(), before=(), file=None, note=None, sub=None, script=None):
+        s = {"id": sid, "title": title, "text": text, "before": [k for k in before if k in fs], "file": file,
+             "note": note, "sub": sub, "script": script or [], "cmds": list(cmds), "runs": []}
+        if sub:
+            s["cmds"] = [f"sh {_q(script_path)} {sub}"]
+            s["runs"] = [c for kind, c in s["script"] if kind in ("run", "run_any")]
+        return s
 
+    exported = has("export_ok") and not has("export_incomplete", "export_hosts_short")
     setup = [
         step("tools", "Get the tools and the code",
-             "You need Terraform 1.7 or newer, Python 3, git, and the Cato CLI (catocli 3.3.0 or newer, installed with "
-             "pip, ideally in its own virtual environment). Then download the migration repo and work inside it. Every "
-             "command in this part runs from the cato-bulk-config-management folder.",
+             "You need Terraform 1.7 or newer, Python 3, git, and the Cato CLI (pip install catocli, ideally in its "
+             "own virtual environment). Then download the migration repo and work inside it. Every command in this "
+             "part runs from the cato-bulk-config-management folder.",
              ["git clone https://github.com/catonetworks/cato-bulk-config-management.git",
               "cd cato-bulk-config-management"],
              note=(f"This report was made on a machine that serves Terraform provider {run.get('provider_version')} "
-                   "from a local build in ~/.terraform.d/mirror, so every deploy command below carries --mirror. Build "
-                   "the provider the same way on any other machine, or drop --mirror once those provider fixes are "
-                   "released.") if run.get("mirror") else None),
+                   "from a local build in ~/.terraform.d/mirror, so the deploy steps pass --mirror. Build the "
+                   "provider the same way on any other machine, or drop --mirror from migrate.sh once those "
+                   "provider fixes are released.") if run.get("mirror") else None),
         step("keys", "Save the two API keys as profiles",
-             f"Use a view-only key for the current account ({sa}) and a key that can edit for the new account ({ta}). "
-             "Swap in each key, keeping the single quotes. Then check each profile names the right account.",
-             [f"catocli configure set --profile {_q(sp)} --cato-token 'SOURCE_API_KEY' --account-id {sa}",
-              f"catocli configure set --profile {_q(tp)} --cato-token 'TARGET_API_KEY' --account-id {ta}",
+             f"Each profile asks for its key (paste it; it isn't shown) and the account number: {sa} for the current "
+             f"account, with a view-only key, and {ta} for the new account, with a key that can edit. Press Return to "
+             "skip the other questions. The last two commands show which account each profile points at.",
+             [f"catocli configure set --profile {_q(sp)}", f"catocli configure set --profile {_q(tp)}",
               f"python3 scripts/cato_profile.py {_q(sp)}", f"python3 scripts/cato_profile.py {_q(tp)}"]),
-        step("guard", "Protect the current account",
-             "This stops every script in the repo from changing the current account.",
-             # One printf argument per line of the file, so no single shell word is too long to print on one line.
-             [f"printf '%s\\n' '{{' '\"protected_accounts\": [\"{sa}\"],' '\"protected_profiles\": [\"{sp}\"]' "
-              f"'}}' > cbcm.config.json"]),
-    ]
-    exported = has("export_ok") and not has("export_incomplete", "export_hosts_short")
-    prepare = [
         step("export", "Export the current account",
              "Reads every setting the migration copies into files, and only reads.",
-             [f"CATO_PROFILE={_q(sp)} catocli export all --strip-ids --no-account-suffix --output-directory {_q(cfg)} "
-              f"--archive-directory {_q(cfg + '_archive')}",
-              f"CATO_PROFILE={_q(sp)} catocli export static_hosts --site-type all -f json --output-directory {_q(cfg)}",
+             [f"export CATO_PROFILE={_q(sp)}",
+              f"catocli export all --strip-ids --no-account-suffix --output-directory {_q(cfg)}",
+              f"catocli export static_hosts --site-type all -f json --output-directory {_q(cfg)}",
               f"python3 scripts/export_webhooks.py --profile {_q(sp)} --config-dir {_q(cfg)}"],
              before=("export_incomplete", "export_hosts_short"),
              note=("Already done for this report. Run it again if the current account changes, then run the check "
                    "again.") if exported else None),
-        step("recheck", "Work through the action plan, then run this check again",
-             "Each time an item is done, run the check again. It refreshes this report and rewrites the files that "
-             "{step:leaveout} uses.", [check]),
+        step("firstcheck", "Run the check on this machine",
+             f"Writes this report and {script_path}, which runs every step from here on. Already done on the "
+             "machine that made this report.", [check_first]),
+    ]
+    prepare = [
+        step("guard", "Protect the current account",
+             "Stops every script in the repo from changing the current account.", sub="guard",
+             script=[("run", f"printf '%s\\n' '{{' '\"protected_accounts\": [\"{sa}\"],' "
+                             f"'\"protected_profiles\": [\"{sp}\"]' '}}' > cbcm.config.json")]),
+        step("recheck", "Work through the action plan, then run the check again",
+             "Each time an item is done, run the check again. It refreshes this report and rewrites the files "
+             "{step:leaveout} uses, and migrate.sh itself.", sub="check", script=[("run_any", check)]),
     ]
     if has("int_classic"):
         names = [x.split(": ", 1)[0] for x in first("int_classic")["items"]]
@@ -641,41 +662,41 @@ def build_runbook(rep, meta):
                             f"Open each of these in the current account's CMA (Resources, Groups) and note its members: "
                             f"{', '.join(names)}. Add each one to {cfg}/groups.json as an Advanced Group with the same name "
                             "and members, keeping empty groups empty. Exporting again overwrites this file, so add them "
-                            "again after any new export. Then check the file still reads:",
-                            [f"python3 -m json.tool {_q(cfg + '/groups.json')} > /dev/null && echo \"groups.json is fine\""],
-                            before=("int_classic",)))
+                            "again after any new export. Then check the file still reads.",
+                            before=("int_classic",), sub="check-groups",
+                            script=[("run", f"python3 -m json.tool {_q(cfg + '/groups.json')} > /dev/null && "
+                                            "echo 'groups.json is fine'")]))
     if has("id_missing", "id_scim_inactive"):
         prepare.append(step("scim", "Copy users and groups (test accounts only)",
                             "For a real migration, your identity team provisions users and groups into the new account "
                             "(the identity items above). For a test account you can copy them instead. Everything copied "
-                            "arrives as SCIM, and the new account needs its SCIM integration created first, with its URL "
-                            "and token added to the profile. The last command copies for real after the dry run before it. "
-                            f"Delete {cfg}/scim_users.csv and scim_groups.csv afterwards: they hold people's names and "
-                            "email addresses.",
-                            [f"catocli configure set --profile {_q(tp)} --cato-token 'TARGET_API_KEY' --account-id {ta} "
-                             "--scim-url 'SCIM_URL' --scim-token 'SCIM_TOKEN'",
-                             f"python3 scripts/scim_sync.py export --source-profile {_q(sp)}",
-                             f"python3 scripts/scim_sync.py push --target-profile {_q(tp)}",
-                             f"python3 scripts/scim_sync.py push --target-profile {_q(tp)} --execute"]))
+                            "arrives as SCIM. Create the new account's SCIM integration first; the first command asks "
+                            "for its SCIM URL and token (press Return to keep the key and account number). The second "
+                            "shows what it would copy and asks before copying. Afterwards, delete "
+                            f"{cfg}/scim_users.csv and scim_groups.csv: they hold people's names and email addresses.",
+                            [f"catocli configure set --profile {_q(tp)}", f"sh {_q(script_path)} copy-users"],
+                            script=[("run", f"python3 scripts/scim_sync.py export --source-profile {_q(sp)}"),
+                                    ("run", f"python3 scripts/scim_sync.py push --target-profile {_q(tp)}"),
+                                    ("confirm", f"Copy these users and groups into account {ta} for real?"),
+                                    ("run", f"python3 scripts/scim_sync.py push --target-profile {_q(tp)} --execute")]))
+        prepare[-1]["runs"] = [c for k, c in prepare[-1]["script"] if k == "run"]
+        prepare[-1]["sub"] = "copy-users"
     if has("tgt_clash"):
         fams = [PURGE_KEYS.get(x, x) for x in first("tgt_clash")["ctx"].get("families") or []]
         if fams:
             only = ",".join(fams)
             prepare.append(step("purge", "Clear the sample rules from the new account",
-                                "Only on a brand-new account: this deletes every rule in these policies. The first "
-                                "command lists what it would delete. The second deletes, and asks you to type "
-                                f"{ta} first.",
-                                [f"python3 scripts/purge_all.py --profile {_q(tp)} --only {only}",
-                                 f"python3 scripts/purge_all.py --profile {_q(tp)} --only {only} --execute"],
-                                before=("tgt_clash",)))
+                                "Only on a brand-new account: this deletes every rule in these policies. It lists what "
+                                f"it would delete and asks first; then the delete itself asks you to type {ta}.",
+                                before=("tgt_clash",), sub="clear-samples",
+                                script=[("run", f"python3 scripts/purge_all.py --profile {_q(tp)} --only {only}"),
+                                        ("confirm", f"Delete these rules from account {ta}?"),
+                                        ("run", f"python3 scripts/purge_all.py --profile {_q(tp)} --only {only} --execute")]))
     prepare.append(step("leaveout", "Leave out what isn't ready yet",
                         "Copies the two exclusion files this check wrote into their folders, then writes "
                         f"{tcfg}: the export without the rules that wait on anything still missing (Appendix A lists "
                         "them). With nothing missing it's an identical copy, so always run this step, and run it again "
-                        "after every check.",
-                        [f"cp {_q(out + '/exclude-0-dependencies.auto.tfvars')} 0-dependencies/",
-                         f"cp {_q(out + '/exclude-1-sites.auto.tfvars')} 1-sites/",
-                         f"sh {_q(out + '/scope_command.sh')}"]))
+                        "after every check.", sub="leave-out", script=leave_out))
     if has("feat_wifi"):
         keys = first("feat_wifi")["items"]
         prepare.append(step("wifi", "Add the Wi-Fi passwords",
@@ -702,53 +723,56 @@ def build_runbook(rep, meta):
         step("foundations", "Build the shared objects, sites, app connectors and groups",
              f"Builds the first four folders in order. It asks you to type {ta} to confirm, then ends with a table: every "
              "line should say applied. The sites show Disconnected until their Sockets are connected, which is expected.",
-             [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
-              "--folders 0-dependencies,1-sites,2-app-connectors,3-groups"],
-             before=BEFORE_FOUNDATIONS),
+             before=BEFORE_FOUNDATIONS, sub="foundations",
+             script=[("run", f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
+                             "--folders 0-dependencies,1-sites,2-app-connectors,3-groups")]),
         step("policies", "Add the policies",
              f"Deploys every policy folder in order and asks for {ta} again. Rules that wait on a missing item stay out "
-             "until {step:after} brings them back.",
-             [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} --keep-going "
-              "--start-at 4-policies/always-on"],
-             before=BEFORE_POLICIES),
+             "until {step:after} brings them back.", before=BEFORE_POLICIES, sub="policies",
+             script=[("run", f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
+                             "--keep-going --start-at 4-policies/always-on")]),
     ]
     verify = [
         step("replan", "Confirm Terraform has nothing left to do",
-             "Changes nothing. Every line should say ok, with 0 to add, change or delete.",
-             [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode plan{mir} --config-dir {_q(tcfg)} --keep-going"]),
+             "Changes nothing. Every line should say ok, with 0 to add, change or delete.", sub="replan",
+             script=[("run_any", f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode plan{mir} --config-dir {_q(tcfg)} "
+                                 "--keep-going")]),
         step("export_target", "Export the new account",
-             "In parts, because one long export can be cut off part way. Check the last lines of each say every "
-             "type succeeded.",
-             [f"CATO_PROFILE={_q(tp)} catocli export all --no-account-suffix --output-directory {_q(vexp)} --types {h}"
-              for h in _type_parts()]
-             + [f"CATO_PROFILE={_q(tp)} catocli export static_hosts --site-type all -f json --output-directory {_q(vexp)}"]),
+             "In parts, because one long export can be cut off part way. Check the last lines of each part say every "
+             "type succeeded.", sub="export-new",
+             script=[("run", f"CATO_PROFILE={_q(tp)} catocli export all --no-account-suffix --output-directory {_q(vexp)} "
+                             f"--types {h}") for h in _type_parts()]
+             + [("run", f"CATO_PROFILE={_q(tp)} catocli export static_hosts --site-type all -f json "
+                        f"--output-directory {_q(vexp)}")]),
         step("compare", "Check rule order and content against the source",
              "A plan can't see either. The first should end with ALL ORDERING MATCHES. In the second, the only "
              "differences to expect are PoP address names (allocationIp), which every account gets its own of.",
-             [f"python3 scripts/order_check.py {_q(tcfg)} {_q(vexp)}",
-              f"python3 scripts/fidelity_check.py {_q(tcfg)} {_q(vexp)}"]),
+             sub="compare", script=[("run_any", f"python3 scripts/order_check.py {_q(tcfg)} {_q(vexp)}"),
+                                    ("run_any", f"python3 scripts/fidelity_check.py {_q(tcfg)} {_q(vexp)}")]),
     ]
+    bring_back = [("run_any", check)] + leave_out + [("run", deploy_all)]
     finish = []
     if has("feat_waf_range", "feat_waf_range_early"):
         names = (first("feat_waf_range") or first("feat_waf_range_early"))["ctx"].get("names") or []
         finish.append(step("waf", "Create the blocked IP ranges by hand",
                            f"Now that the shared objects exist, create {', '.join(names)} in the new account's CMA "
-                           "(Resources, IP Ranges) with the same values as in the current account. Then run the check "
-                           "again ({step:recheck}), redo {step:leaveout}, and deploy. Don't skip the first two: the "
-                           "shared objects folder now owns every IP range in the account and would delete one the old "
-                           "exclusion file still leaves out.", [check, deploy_all],
-                           before=("feat_waf_range", "feat_waf_range_early")))
+                           "(Resources, IP Ranges) with the same values as in the current account. Then bring them in: "
+                           "this runs the check, leaves out what's still missing and deploys. Don't deploy any other "
+                           "way first: the shared objects folder now owns every IP range in the account and would "
+                           "delete one the old exclusion file still leaves out.",
+                           before=("feat_waf_range", "feat_waf_range_early"), sub="bring-back", script=bring_back))
     if has("feat_l7"):
         sites = ", ".join(first("feat_l7")["ctx"].get("sites") or [])
         finish.append(step("l7", "Turn on LAN Layer 7 and add its rules",
                            f"In the new account's CMA, turn on LAN Layer 7 enforcement for {sites}. The API can't see "
-                           "that switch, so tell the check with --lan-l7-confirmed (keep it on every later run), redo "
-                           "{step:leaveout}, and deploy.",
-                           [check if run.get("lan_l7_confirmed") else check.replace(" --pdf", " --lan-l7-confirmed --pdf"),
-                            deploy_all], before=("feat_l7",)))
+                           "that switch, so this runs the check with --lan-l7-confirmed (and the migrate.sh it writes "
+                           "keeps it from then on), leaves out what's still missing and deploys.",
+                           before=("feat_l7",), sub="bring-back-l7",
+                           script=[("run_any", check_l7)] + leave_out + [("run", deploy_all)]))
     finish.append(step("after", "Bring left-out rules back in",
-                       "Whenever a missing item arrives in the new account, run the check again, redo {step:leaveout}, "
-                       "and deploy. Folders with nothing new to do say so and change nothing.", [check, deploy_all]))
+                       "Whenever a missing item arrives in the new account, run this: it runs the check, leaves out "
+                       "what's still missing and deploys. Folders with nothing new to do say so and change nothing.",
+                       sub="bring-back", script=bring_back))
     if has("feat_ipsec"):
         finish.append(step("ipsec", "Add the IPSec tunnels",
                            "Tunnel settings and pre-shared keys never leave the current account. Add them in the new "
@@ -759,11 +783,12 @@ def build_runbook(rep, meta):
                        "redeploying each cloud vSocket with your Cato account team."))
     finish.append(step("trouble", "If a step fails",
                        "Read the error's last lines: they're Cato's own message and usually say what's missing. Fix the "
-                       "cause, then carry on from the folder that failed, using its name from the summary table. Don't "
-                       "change or delete what Terraform built by hand in the CMA, and never delete a terraform.tfstate "
-                       "file.",
-                       [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
-                        "--keep-going --start-at 4-policies/internet-firewall"]))
+                       "cause, then carry on from the folder that failed, using its name from the summary table (the "
+                       "folder below is an example). Don't change or delete what Terraform built by hand in the CMA, and "
+                       "never delete a terraform.tfstate file.",
+                       [f"sh {_q(script_path)} resume 4-policies/internet-firewall"]))
+    finish[-1]["runs"] = [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
+                          "--keep-going --start-at FOLDER"]
     phases = [("Set up, once on each machine", setup), ("Prepare", prepare), ("Run the migration", deploy),
               ("Check the result", verify), ("Finish up", finish)]
     n, ids = 0, {}
@@ -778,41 +803,78 @@ def build_runbook(rep, meta):
     return phases
 
 
-# A shell word: unquoted runs and quoted strings, glued together ("--customer 'A B'" is two words).
-_SHELL_WORD = re.compile(r"""(?:[^\s'"]+|'[^']*'|"(?:\\.|[^"\\])*")+""")
-CMD_WIDTH = 84
+CMD_LINE_MAX = 100  # longest command line Part 2 prints (10px code fits ~104 on an A4 line): wider would wrap in
+# print, and a wrapped line breaks when copied
 
 
-def shell_lines(cmd, width=CMD_WIDTH):
-    """A long command broken at word boundaries with ' \\' continuations, never inside a word or a quote.
+def chain(cmds):
+    """Commands one per line, every line but the last ending in "&&": pasted with line breaks the shell carries
+    on after "&&", pasted by a PDF viewer that turns line breaks into spaces it is the same chain on one line."""
+    return "\n".join(c + (" &&" if i < len(cmds) - 1 else "") for i, c in enumerate(cmds))
 
-    What a reader sees is then exactly what runs when they paste it: a PDF turns every
-    soft wrap into a hard line break when its text is copied, which splits commands.
-    A flag is kept with its value. Lines after the first are indented two spaces.
-    """
-    if len(cmd) <= width:
-        return cmd
-    words = _SHELL_WORD.findall(cmd)
-    units, i = [], 0
-    while i < len(words):
-        w = words[i]
-        nxt = words[i + 1] if i + 1 < len(words) else None
-        if w.startswith("-") and nxt is not None and not nxt.startswith("-") and nxt not in ("&&", "||", "|", ";", ">"):
-            units.append(f"{w} {nxt}")
-            i += 2
-        else:
-            units.append(w)
-            i += 1
-    lines, cur = [], ""
-    for u in units:
-        cand = f"{cur} {u}" if cur else u
-        if cur and len(cand) + 2 > width:
-            lines.append(cur + " \\")
-            cur = "  " + u
-        else:
-            cur = cand
-    lines.append(cur)
-    return "\n".join(lines)
+
+def _sq(cmd):
+    return "'" + cmd.replace("'", "'\\''") + "'"
+
+
+MIGRATE_HEAD = r"""#!/bin/sh
+# Written by preflight_check.py on {when} for {source} -> {target}.
+# Every run of the check rewrites it. Part 2 of preflight_report.html says when to run each step.
+# Usage: sh {out}/migrate.sh STEP    (sh {out}/migrate.sh list shows the steps)
+cd {root} || exit 1
+
+run() {{  # show a command, run it, and stop if it fails
+  printf '\n$ %s\n' "$1"
+  sh -c "$1" || {{ printf '\nStopped: that command failed. Fix the cause, then run this step again.\n' >&2; exit 1; }}
+}}
+run_any() {{  # show a command and run it; its exit code is part of its answer (the check exits 2 on blockers)
+  printf '\n$ %s\n' "$1"
+  sh -c "$1"
+}}
+confirm() {{  # ask before anything that changes the new account for real
+  printf '\n%s [y/N] ' "$1"
+  read -r answer
+  case "$answer" in y|Y|yes|Yes|YES) return 0 ;; *) printf 'Not done.\n'; exit 0 ;; esac
+}}
+"""
+
+
+def migrate_script(phases, repo_root, meta):
+    """migrate.sh: one subcommand per run book step that runs commands, so Part 2 prints short lines."""
+    seen, funcs, cases, usage = set(), [], [], []
+    for _, steps in phases:
+        for s in steps:
+            if not s.get("sub") or s["sub"] in seen or not s.get("script"):
+                continue
+            seen.add(s["sub"])
+            fname = "step_" + s["sub"].replace("-", "_")
+            funcs.append(f"{fname}() {{\n" + "\n".join(f"  {kind} {_sq(arg)}" for kind, arg in s["script"]) + "\n}")
+            cases.append(f"  {s['sub']}) {fname} ;;")
+            usage.append(f"  {s['sub']:<15} {s['title']}")
+    usage.append(f"  {'resume FOLDER':<15} Carry on a deploy from FOLDER (its name from the summary table)")
+    deploy = next((c for _, st in phases for s in st if s["id"] == "trouble" for c in s["runs"]), "")
+    run = meta.get("run") or {}
+    head = MIGRATE_HEAD.format(when=meta.get("when", ""), source=meta.get("source", ""), target=meta.get("target", ""),
+                               out=run.get("out_dir", "preflight"), root=_sq(repo_root))
+    return (head + "\n" + "\n\n".join(funcs) + "\n\nusage() {\n  cat <<'STEPS'\nSteps (Part 2 of the report says when "
+            "to run each):\n" + "\n".join(usage) + "\nSTEPS\n}\n\ncase \"$1\" in\n" + "\n".join(cases)
+            + f"\n  resume) [ -n \"$2\" ] || {{ usage; exit 2; }}; run {_sq(deploy.replace('FOLDER', ''))}\"$2\" ;;"
+            + "\n  list|help|-h|--help|\"\") usage ;;"
+            + "\n  *) printf 'Unknown step: %s\\n' \"$1\" >&2; usage; exit 2 ;;\nesac\n")
+
+
+def write_migrate_sh(phases, repo_root, out_dir, meta):
+    """Write <out_dir>/migrate.sh by replacing the file whole, so a step that reruns the check (which rewrites
+    it) keeps reading the copy it started with. Returns the file name, or None without a run book."""
+    if not phases:
+        return None
+    path = os.path.join(out_dir, "migrate.sh")
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(migrate_script(phases, repo_root, meta))
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, path)
+    return "migrate.sh"
 
 
 def _inline(text):
@@ -828,13 +890,12 @@ def render_runbook_html(phases, item_nums):
     if not phases:
         return ""
     out = ['<section class="runbook" id="part2"><div class="eyebrow">Part 2</div><h2>Running the migration</h2>'
-           '<p>For the engineers who run the migration. Every command is set for these two accounts. Only the words in '
-           'CAPITALS are yours to fill in. Steps that say <i>Before this step</i> point at the items in the action plan '
+           '<p>For the engineers who run the migration. Every command is set for these two accounts and fits on one '
+           'line, so it copies cleanly from the PDF too. Most steps run a step of <code>migrate.sh</code>, which the '
+           'check writes next to this report; what each one runs is listed under it. Steps that say <i>Before this '
+           'step</i> point at the items in the action plan '
            'that belong first. Anything still missing is left out by the leave-out step and comes back later, so the '
-           'migration can go ahead without waiting for everything.</p>'
-           '<p class="copynote">Copy commands with the Copy buttons in the HTML version of this report. Some PDF '
-           'viewers turn line breaks into spaces when you copy, which breaks a command printed over two lines '
-           '(its first line ends in <code>\\</code>).</p>']
+           'migration can go ahead without waiting for everything.</p>']
     for i, (title, steps) in enumerate(phases, 1):
         out.append(f'<h3 class="phase" id="phase-{i}">{_esc(title)}</h3>')
         for s in steps:
@@ -843,8 +904,10 @@ def render_runbook_html(phases, item_nums):
                        f'<p>{_inline(s["text"])}</p>'
                        + (f'<div class="before">Before this step: item{"s" if len(nums) != 1 else ""} '
                           f'{_item_links(nums)}</div>' if nums else "")
-                       + "".join(f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(shell_lines(c))}</pre></div>'
-                                 for c in s["cmds"])
+                       + (f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(chain(s["cmds"]))}</pre></div>'
+                          if s["cmds"] else "")
+                       + (f'<div class="runs"><div class="flabel">What it runs (for reference)</div>'
+                          f'<pre>{_esc(chr(10).join(s["runs"]))}</pre></div>' if s.get("runs") else "")
                        + (f'<div class="file"><div class="flabel">File contents</div><pre>{_esc(s["file"])}</pre></div>'
                           if s.get("file") else "")
                        + (f'<p class="snote">{_esc(s["note"])}</p>' if s.get("note") else "") + "</div></div>")
@@ -865,8 +928,10 @@ def render_runbook_md(phases, titles=None):
             out += [f"**{s['n']}. {s['title']}**", "", s["text"], ""]
             if s["before"] and titles:
                 out += ["Before this step: " + "; ".join(titles[k] for k in s["before"] if k in titles) + ".", ""]
-            for c in s["cmds"]:
-                out += ["```bash", c, "```", ""]
+            if s["cmds"]:
+                out += ["```bash", chain(s["cmds"]), "```", ""]
+            if s.get("runs"):
+                out += ["What it runs (for reference):", "", "```text", *s["runs"], "```", ""]
             if s.get("file"):
                 out += ["```hcl", s["file"], "```", ""]
             if s.get("note"):

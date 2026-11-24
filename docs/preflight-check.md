@@ -105,6 +105,16 @@ What it holds:
   step says which action plan items belong before it. `--mirror` is added to
   every Terraform command when the pinned provider version is found in
   `~/.terraform.d/mirror`. The same steps are in `preflight_report.md`.
+- `migrate.sh`, written next to the report on every run: one subcommand per
+  Part 2 step (`sh preflight/migrate.sh foundations`, `... bring-back`,
+  `... resume FOLDER`, `... list`), so every command Part 2 prints is one
+  short line and copies cleanly even from a PDF viewer that turns line breaks
+  into spaces. Each step shows what it runs, stops if a command fails, and
+  asks before anything that deletes or copies into the new account. The
+  first steps on a new machine (getting the repo, saving the keys with
+  `catocli configure set --profile NAME`, which asks for the key without
+  showing it, the first export and check) are printed as short lines chained
+  with `&&`, since `migrate.sh` doesn't exist yet.
 - Appendix A: each affected policy rule once, with the numbered items it waits on.
   The cover, the action plan summary and this appendix all count the same rules.
 - Appendix B: the technical notes for the migration engineers.

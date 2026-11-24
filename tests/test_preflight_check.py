@@ -424,23 +424,26 @@ class CustomerReport(unittest.TestCase):
         rep.add("features", "ACTION", "feat_l7", {"n": 1, "sites": ["HQ"]}, "l", items=["NR / FW (sites: HQ)"])
         exp = export(rules=[rule("wanNetwork", "A")])
         phases = self.pr.build_runbook(rep, self._meta())
-        cmds = [c for _, steps in phases for s in steps for c in s["cmds"]]
-        files = [s["file"] for _, steps in phases for s in steps if s.get("file")]
-        self.assertIn("catocli configure set --profile src-ro --cato-token 'SOURCE_API_KEY' --account-id 111", cmds)
-        self.assertIn("python3 scripts/purge_all.py --profile 'new acct' --only internet_firewall,lan_firewall --execute", cmds)
-        self.assertIn("sh preflight/scope_command.sh", cmds)
-        self.assertTrue(any(c.startswith("python3 scripts/bulk_apply.py --profile 'new acct' --mode deploy --config-dir "
-                                         "config_data_target --folders 0-dependencies") for c in cmds))
-        self.assertTrue(any("--lan-l7-confirmed" in c for c in cmds))
-        self.assertFalse(any("--mirror" in c for c in cmds))
+        steps = {s["id"]: s for _, st in phases for s in st}
+        runs = [c for s in steps.values() for c in s["runs"]]
+        files = [s["file"] for s in steps.values() if s.get("file")]
+        self.assertEqual(steps["keys"]["cmds"][0], "catocli configure set --profile src-ro")  # asks for the key itself
+        self.assertEqual(steps["purge"]["cmds"], ["sh preflight/migrate.sh clear-samples"])
+        self.assertIn("python3 scripts/purge_all.py --profile 'new acct' --only internet_firewall,lan_firewall --execute", runs)
+        self.assertIn("sh preflight/scope_command.sh", steps["leaveout"]["runs"])
+        self.assertTrue(steps["foundations"]["runs"][0].startswith(
+            "python3 scripts/bulk_apply.py --profile 'new acct' --mode deploy --config-dir config_data_target --folders 0-dependencies"))
+        self.assertTrue(any("--lan-l7-confirmed" in c for c in steps["l7"]["runs"]))
+        self.assertFalse(any("--mirror" in c for c in runs))
         self.assertEqual(files, ['wifi_ssid_passkeys = {\n  "HQ:Corp" = ""\n}'])
         mirrored = self.pr.build_runbook(rep, self._meta(mirror=True))
-        self.assertTrue(all("--mirror" in c for _, st in mirrored for s in st for c in s["cmds"] if "bulk_apply" in c))
+        self.assertTrue(all("--mirror" in c for _, st in mirrored for s in st for c in s["runs"] if "bulk_apply" in c))
         out = self.pr.render_customer_html(rep, exp, self._meta())
         self.assertIn("Running the migration", out)
         self.assertIn('<div class="before">Before this step: item', out)
+        self.assertIn("What it runs (for reference)", out)
         md = "\n".join(self.pr.render_runbook_md(phases, {"feat_wifi": "Provide passwords"}))
-        self.assertIn("```bash\nsh preflight/scope_command.sh\n```", md)
+        self.assertIn("```bash\nsh preflight/migrate.sh leave-out\n```", md)
         self.assertEqual(self.pr.build_runbook(rep, {"source": "", "target": ""}), [])  # no run details, no runbook
 
     def test_chapters_and_every_link_lands(self):
@@ -499,37 +502,7 @@ class GettingStartedGuide(unittest.TestCase):
 
 
 class PastedCommands(unittest.TestCase):
-    """Long commands are broken with ' \\' continuations: what is printed is exactly what runs when pasted."""
-
-    CMDS = [
-        "CATO_PROFILE=source catocli export all --strip-ids --no-account-suffix --output-directory config_data "
-        "--archive-directory config_data_archive",
-        'python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf '
-        '--customer "CUSTOMER NAME"',
-        "catocli configure set --profile 'new acct' --cato-token 'TARGET_API_KEY' --account-id 222 "
-        "--scim-url 'SCIM_URL' --scim-token 'SCIM_TOKEN'",
-        "printf '{\\n  \"protected_accounts\": [\"111\"],\\n  \"protected_profiles\": [\"src\"]\\n}\\n' > out.json",
-        "python3 -m json.tool config_data/groups.json > /dev/null && echo \"groups.json is fine\"",
-    ]
-
-    def _run(self, cmd):
-        import subprocess
-        import tempfile
-        with tempfile.TemporaryDirectory() as d:
-            script = 'args(){ printf "%s\\0" "$@"; }; args ' + cmd
-            r = subprocess.run(["bash", "-c", script], cwd=d, capture_output=True)
-            files = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d)}
-            return r.stdout, files
-
-    def test_broken_commands_parse_the_same(self):
-        import preflight_report as pr
-        for cmd in self.CMDS:
-            shown = pr.shell_lines(cmd)
-            for line in shown.splitlines():
-                self.assertLessEqual(len(line), pr.CMD_WIDTH + 2, line)
-            for line in shown.splitlines()[:-1]:
-                self.assertTrue(line.endswith(" \\"), line)
-            self.assertEqual(self._run(shown), self._run(cmd), shown)
+    """Every printed command is short and chained with "&&", so it pastes the same in any PDF viewer."""
 
     def test_guide_blocks_paste_the_same_with_or_without_line_breaks(self):
         # Some PDF viewers copy line breaks, others turn them into spaces: a guide block must run the same either way.
@@ -549,27 +522,80 @@ class PastedCommands(unittest.TestCase):
                 self.assertEqual(subprocess.run(["zsh", "-n", "-c", form]).returncode, 0, form)
         self.assertIn("white-space:pre;", gs.render_html())
 
-    def test_every_runbook_line_fits_and_the_guard_writes_json(self):
+    META = {"when": "2026-11-24", "source": "Src (1234567)", "target": "Tgt (7654321)",
+            "run": {"source_profile": "current-acct", "target_profile": "new-acct", "source_account": "1234567",
+                    "target_account": "7654321", "config_dir": "config_data", "target_config_dir": "config_data_target",
+                    "out_dir": "preflight", "probe": True, "customer": "Example Co", "lan_l7_confirmed": False,
+                    "provider_version": "2.0.0", "mirror": True}}
+
+    def _phases(self):
+        import preflight_report as pr
+        rep = pc.Report()
+        for k, ctx, items in (("feat_l7", {"n": 1, "sites": ["S"]}, ["x"]), ("feat_wifi", {"n": 1}, ["S:W"]),
+                              ("tgt_clash", {"n": 1, "families": ["internetFirewall"]}, ["internetFirewall: 1 (x)"]),
+                              ("id_missing", {"type": "SCIM", "n": 1, "groups": 1, "users": 0}, ["user group 'G'"]),
+                              ("int_classic", {"n": 1}, ["Legacy: 1 rule(s)"])):
+            rep.add("features", "ACTION", k, ctx, "t", items=items)
+        return pr, pr.build_runbook(rep, self.META)
+
+    def test_every_printed_command_is_short_and_pastes_either_way(self):
+        import shlex
+        import subprocess
+        pr, phases = self._phases()
+        for _, st in phases:
+            for s in st:
+                if not s["cmds"]:
+                    continue
+                text = pr.chain(s["cmds"])
+                for line in text.splitlines():
+                    self.assertLessEqual(len(line), pr.CMD_LINE_MAX, line)  # prints whole, never needs a continuation
+                    self.assertFalse(line.endswith("\\"), line)
+                flat = text.replace("\n", " ")
+                self.assertEqual(shlex.split(text), shlex.split(flat))
+                for form in (text, flat):
+                    self.assertEqual(subprocess.run(["bash", "-n", "-c", form]).returncode, 0, form)
+                    self.assertEqual(subprocess.run(["zsh", "-n", "-c", form]).returncode, 0, form)
+
+    def test_migrate_script_runs_its_steps(self):
         import json
         import subprocess
         import tempfile
-        import preflight_report as pr
-        meta = {"run": {"source_profile": "current-acct", "target_profile": "new-acct", "source_account": "1234567",
-                        "target_account": "7654321", "config_dir": "config_data", "target_config_dir": "config_data_target",
-                        "out_dir": "preflight", "probe": True, "customer": "Example Co", "lan_l7_confirmed": False,
-                        "provider_version": "2.0.0", "mirror": True}}
-        rep = pc.Report()
-        for k, ctx, items in (("feat_l7", {"n": 1, "sites": ["S"]}, ["x"]), ("feat_wifi", {"n": 1}, ["S:W"]),
-                              ("tgt_clash", {"n": 1, "families": ["internetFirewall"]}, ["internetFirewall: 1 (x)"])):
-            rep.add("features", "ACTION", k, ctx, "t", items=items)
-        cmds = [c for _, st in pr.build_runbook(rep, meta) for s in st for c in s["cmds"]]
-        for c in cmds:  # a word longer than a line would wrap in print and break when copied
-            for line in pr.shell_lines(c).splitlines():
-                self.assertLessEqual(len(line), pr.CMD_WIDTH + 2, line)
-        guard = [c for c in cmds if c.startswith("printf")][0]
-        with tempfile.TemporaryDirectory() as d:
-            subprocess.run(["bash", "-c", pr.shell_lines(guard)], cwd=d, check=True)
-            with open(os.path.join(d, "cbcm.config.json")) as fh:
+        pr, phases = self._phases()
+        with tempfile.TemporaryDirectory() as repo:
+            os.makedirs(os.path.join(repo, "preflight"))
+            os.makedirs(os.path.join(repo, "bin"))
+            log = os.path.join(repo, "calls.log")
+            with open(os.path.join(repo, "bin", "python3"), "w") as fh:  # stand-in: records each call, changes nothing
+                fh.write(f"#!/bin/sh\necho \"python3 $*\" >> {log}\n")
+            os.chmod(os.path.join(repo, "bin", "python3"), 0o755)
+            self.assertEqual(pr.write_migrate_sh(phases, repo, os.path.join(repo, "preflight"), self.META), "migrate.sh")
+            script = os.path.join(repo, "preflight", "migrate.sh")
+            env = dict(os.environ, PATH=os.path.join(repo, "bin") + os.pathsep + os.environ["PATH"])
+
+            def step(*args, answer=""):
+                return subprocess.run(["sh", script, *args], cwd="/", env=env, input=answer, text=True, capture_output=True)
+
+            self.assertEqual(subprocess.run(["sh", "-n", script]).returncode, 0)
+            listing = step("list").stdout
+            for sub in ("guard", "check", "check-groups", "copy-users", "clear-samples", "leave-out", "foundations",
+                        "policies", "replan", "export-new", "compare", "bring-back", "bring-back-l7", "resume FOLDER"):
+                self.assertIn(sub, listing)
+            step("guard")  # runs from anywhere: the script moves to the repo first
+            with open(os.path.join(repo, "cbcm.config.json")) as fh:
                 self.assertEqual(json.load(fh), {"protected_accounts": ["1234567"], "protected_profiles": ["current-acct"]})
-        types = ",".join(c.split("--types ")[1] for c in cmds if "--types " in c).split(",")
+            r = step("clear-samples", answer="n\n")  # a "no" stops before anything is deleted
+            self.assertIn("Not done.", r.stdout)
+            with open(log) as fh:
+                calls = fh.read()
+            self.assertIn("purge_all.py --profile new-acct --only internet_firewall\n", calls)
+            self.assertNotIn("--execute", calls)
+            step("clear-samples", answer="y\n")
+            with open(log) as fh:
+                self.assertIn("--only internet_firewall --execute", fh.read())
+            r = step("resume", "4-policies/wan-network")
+            with open(log) as fh:
+                self.assertIn("--keep-going --start-at 4-policies/wan-network", fh.read())
+            self.assertNotEqual(step("no-such-step").returncode, 0)
+        exports = [c for _, st in phases for s in st if s["id"] == "export_target" for c in s["runs"]]
+        types = ",".join(c.split("--types ")[1] for c in exports if "--types " in c).split(",")
         self.assertEqual(sorted(types), sorted(pr.EXPORT_TYPES))  # every type still exported once

@@ -62,7 +62,7 @@ from collections import Counter, defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cato_profile import REPO_ROOT, get_profile, load_protected  # noqa: E402
 from preflight_report import (_shown, build_runbook, guide, html_to_pdf, render_customer_html,  # noqa: E402
-                              render_runbook_md)
+                              render_runbook_md, write_migrate_sh)
 
 DEFAULT_ENDPOINT = "https://api.catonetworks.com/api/v1/graphql2"
 SEVERITIES = ["BLOCKER", "ACTION", "WARN", "INFO", "OK"]
@@ -1334,6 +1334,7 @@ def main():
         fh.write(render_customer_html(rep, exp, meta, customer=args.customer))
     written = ["preflight_report.md", "preflight_report.json", "preflight_report.html"]
     written += write_leave_out(rep, args.config_dir, args.out_dir)
+    written += [x for x in [write_migrate_sh(build_runbook(rep, meta), REPO_ROOT, args.out_dir, meta)] if x]
     if args.pdf:
         err = html_to_pdf(html_path, os.path.join(args.out_dir, "preflight_report.pdf"))
         if err:
