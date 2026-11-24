@@ -626,7 +626,7 @@ def main():
         log(f"\n=== {folder} ({args.mode}) ===")
 
         if args.mode in ("plan", "deploy"):
-            if args.mode == "deploy" and args.mirror:
+            if args.mirror:  # plan AND deploy: a lock from the registry build never matches a local build
                 # Only when exercising a LOCAL provider build (--mirror): a
                 # rebuild changes the binary hash, so every folder's committed
                 # .terraform.lock.hcl (pinned to the same version) no longer

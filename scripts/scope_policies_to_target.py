@@ -20,6 +20,11 @@ Usage:
 
   --skip-scim        every usersGroup / user reference counts as missing
                      (use when SCIM identities are not pushed to this target)
+  --skip-rule NAME   leave out one rule the target cannot hold for a reason
+                     that is not a missing reference (e.g. it needs a site
+                     setting, such as LAN Layer 7 enforcement, that only the
+                     CMA UI can switch on). Nested LAN firewall rules are named
+                     "<network rule> / <firewall rule>". Repeatable.
   --missing KEY=NAME a referenced object that does not exist on the target,
                      by the JSON key rules use for it (usersGroup, user, group,
                      globalIpRange, device, customCategory, bandwidthPriority,
@@ -53,8 +58,10 @@ def refs(obj, key_filter=None):
             yield from refs(v, key_filter)
 
 
-def blockers(rule, missing, skip_scim):
+def blockers(rule, missing, skip_scim, skip_rules=(), qualified_name=None):
     out = set()
+    if (qualified_name or rule.get("name")) in skip_rules:
+        out.add("skipped:" + (qualified_name or rule.get("name")))
     for k, name in refs(rule):
         if skip_scim and k in ("usersGroup", "user"):
             out.add(f"{k}:{name}")
@@ -76,7 +83,7 @@ def renumber(rows, removed, index_key, group_key=None):
     return kept
 
 
-def scope_file(path, missing, skip_scim):
+def scope_file(path, missing, skip_scim, skip_rules=()):
     doc = json.load(open(path))
     family = next(iter(doc["data"]["policy"]))
     pol = doc["data"]["policy"][family]["policy"]
@@ -88,7 +95,7 @@ def scope_file(path, missing, skip_scim):
         kept = []
         for it in items:
             rule = it.get("rule") or {}
-            b = blockers(rule, missing, skip_scim)
+            b = blockers(rule, missing, skip_scim, skip_rules)
             if b:
                 removed[rule.get("name")] = b
                 continue
@@ -97,7 +104,8 @@ def scope_file(path, missing, skip_scim):
                 it = copy.deepcopy(it)
                 nested = []
                 for fr in it["firewall_rules"]:
-                    fb = blockers(fr.get("rule") or {}, missing, skip_scim)
+                    fb = blockers(fr.get("rule") or {}, missing, skip_scim, skip_rules,
+                                  f"{rule.get('name')} / {(fr.get('rule') or {}).get('name')}")
                     if fb:
                         removed[f"{rule.get('name')} / {(fr.get('rule') or {}).get('name')}"] = fb
                     else:
@@ -118,6 +126,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--skip-scim", action="store_true")
     ap.add_argument("--missing", action="append", default=[], metavar="KEY=NAME")
+    ap.add_argument("--skip-rule", action="append", default=[], metavar="NAME")
     ap.add_argument("--report")
     a = ap.parse_args()
     if os.path.abspath(a.out) == os.path.abspath(a.config_dir):
@@ -132,7 +141,7 @@ def main():
     shutil.copytree(a.config_dir, a.out, ignore=shutil.ignore_patterns(".remapped"))
     report = []
     for path in sorted(glob.glob(os.path.join(a.config_dir, "all_*_rules_and_sections.json"))):
-        doc, family, removed = scope_file(path, missing, a.skip_scim)
+        doc, family, removed = scope_file(path, missing, a.skip_scim, set(a.skip_rule))
         with open(os.path.join(a.out, os.path.basename(path)), "w") as f:
             json.dump(doc, f, indent=2)
         for name, why in removed.items():
