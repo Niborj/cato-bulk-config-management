@@ -476,3 +476,22 @@ class CustomerReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GettingStartedGuide(unittest.TestCase):
+    """The one-page guide: branded, and every flag it tells people to type really exists."""
+
+    def test_guide_renders_and_its_flags_exist(self):
+        import re
+        import subprocess
+        import getting_started as gs
+        out = gs.render_html()
+        for needle in ("Getting Started Guide to Account Migration", 'class="cato-logo"', "@font-face",
+                       "Gather two API keys", "Run the check", "What to do next", gs.CHECK.replace('"', "&quot;")):
+            self.assertIn(needle, out)
+        scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+        for script, line in (("preflight_check.py", gs.CHECK), ("export_webhooks.py", gs.EXPORT[-1])):
+            helptext = subprocess.run([sys.executable, os.path.join(scripts, script), "--help"],
+                                      capture_output=True, text=True).stdout
+            for flag in re.findall(r"(--[a-z-]+)", line):
+                self.assertIn(flag, helptext, f"{script} has no {flag}")

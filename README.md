@@ -14,6 +14,11 @@ the same JSON can be replayed into a different tenant to replicate it.
 This package is fully **tenant-agnostic**: it ships with no account ids, profile
 names, or data. You supply your own `config_data/` exports and credentials.
 
+**Moving to a new account?** Start with the
+[Getting Started Guide to Account Migration](docs/getting-started.md)
+([one-page PDF](docs/getting-started-guide.pdf)): the two API keys to gather, the
+commands that run the before-you-migrate check, and what to do with its report.
+
 ---
 
 ## 1. Provider requirement (read first)

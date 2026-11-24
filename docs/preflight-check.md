@@ -1,5 +1,8 @@
 # Before you migrate: the dependency check
 
+New to this? The [Getting Started Guide to Account Migration](getting-started.md) is the one-page
+version: the keys to gather, the commands to run, and what to do next.
+
 `scripts/preflight_check.py` compares a source tenant with a target tenant and
 tells you, before anything is applied, what the target is missing. Run it as
 soon as you have a source export and credentials for the target.
