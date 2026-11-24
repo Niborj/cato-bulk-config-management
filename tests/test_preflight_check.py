@@ -673,11 +673,13 @@ class PastedCommands(unittest.TestCase):
 
 FAKE_CATOCLI = r'''#!PYTHON
 """Stand-in for catocli 3.3.0's export: aborts `export all` at the first type in $DENY, like the real one."""
-import os, sys
+import os, sys, time
 TYPES = ["a_rules", "groups", "sb_rules", "wf_rules", "wnw_rules"]
 args = sys.argv[1:]
 with open(os.environ["CALLS"], "a") as fh:
     fh.write(" ".join(args) + "\n")
+with open(os.environ["CALLS"] + ".env", "a") as fh:
+    fh.write(os.environ.get("PYTHONUNBUFFERED", "") + "\n")
 deny = [t for t in os.environ.get("DENY", "").split(",") if t]
 if args[:2] == ["export", "all"]:
     types = args[args.index("--types") + 1].split(",") if "--types" in args else TYPES
@@ -686,6 +688,8 @@ if args[:2] == ["export", "all"]:
         sys.exit(1)
     for i, t in enumerate(types, 1):
         print(f"[{i}/{len(types)}] {t}: exporting...")
+        if t == os.environ.get("SLOW"):  # a big policy: a quiet spell, with no flush (catocli doesn't flush either)
+            time.sleep(1.5)
         if t in deny:
             print(f"[{i}/{len(types)}] {t}: FAILED (Unexpected error during API call - API returned errors: Access "
                   f"denied: Insufficient privileges for account 1234567)")
@@ -706,7 +710,7 @@ sys.exit(2)
 class ExportSource(unittest.TestCase):
     """export_source.py carries on past types the key is refused, and records them for the check."""
 
-    def _run(self, deny="", noabort=False):
+    def _run(self, deny="", noabort=False, slow="", extra=()):
         import json
         import subprocess
         import tempfile
@@ -715,18 +719,37 @@ class ExportSource(unittest.TestCase):
         os.makedirs(os.path.join(d, "bin"))
         fake = os.path.join(d, "bin", "catocli")
         with open(fake, "w") as fh:
-            fh.write(FAKE_CATOCLI.replace("PYTHON", sys.executable))
+            fh.write(FAKE_CATOCLI.replace("#!PYTHON", "#!" + sys.executable, 1))
         os.chmod(fake, 0o755)
         env = dict(os.environ, PATH=os.path.join(d, "bin") + os.pathsep + os.environ["PATH"], DENY=deny,
-                   CALLS=os.path.join(d, "calls.log"), NOABORT="1" if noabort else "")
+                   CALLS=os.path.join(d, "calls.log"), NOABORT="1" if noabort else "", SLOW=slow)
         script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "export_source.py")
         r = subprocess.run([sys.executable, script, "--profile", "src", "--config-dir", os.path.join(d, "out"),
-                            "--no-webhooks"], env=env, capture_output=True, text=True)
+                            "--no-webhooks", *extra], env=env, capture_output=True, text=True)
         with open(os.path.join(d, "out", "export_report.json")) as fh:
             report = json.load(fh)
         with open(os.path.join(d, "calls.log")) as fh:
             calls = fh.read().splitlines()
+        with open(os.path.join(d, "calls.log.env")) as fh:
+            self.unbuffered = fh.read().splitlines()
         return r, report, calls
+
+    def test_progress_shows_while_a_slow_type_exports(self):
+        # catocli holds its output back when it writes to a pipe, so the export looked stalled for minutes and
+        # then printed everything at once. Each line now arrives as it happens, and a quiet spell gets a line
+        # naming the type still being exported, printed between that type's start and finish.
+        r, _, calls = self._run(slow="wf_rules", extra=("--heartbeat", "0.4"))
+        streamed = [u for c, u in zip(calls, self.unbuffered) if not c.endswith("--types _")]
+        self.assertEqual(set(streamed), {"1"})  # every streamed catocli run hands over each line at once
+        out = r.stdout.splitlines()
+        start = out.index("[4/5] wf_rules: exporting...")
+        end = next(i for i, l in enumerate(out) if l.startswith("[4/5] wf_rules: OK"))
+        still = [i for i, l in enumerate(out) if "Still exporting wf_rules" in l]
+        self.assertTrue(still and all(start < i < end for i in still), r.stdout)
+        self.assertIn("3 of 5 types done", out[still[0]])
+        for words in ("Step 1 of 2: 5 item types", "Step 2 of 2: static hosts", "Finished: 6 exported"):
+            self.assertTrue(any(words in l for l in out), (words, r.stdout))
+        self.assertTrue(re.match(r"\[export_source 0:0\d\] Exporting the current account", out[0]), out[0])
 
     def test_a_refused_type_is_skipped_and_the_rest_still_export(self):
         r, report, calls = self._run(deny="sb_rules")

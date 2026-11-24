@@ -219,6 +219,14 @@ into `config_data/export_report.json`, and the check reports it as
 `export_refused` (with the permission each type needs) or `export_failed`.
 Refusals the check also sees by reading the policy live are listed once.
 
+It shows its progress as it goes, so a long export never looks stalled. Its
+own lines are stamped with the time since it started (`[export_source 1:05]`)
+and say which of the three steps is running. catocli's line for each type
+appears as that type starts and finishes: catocli holds its output back when
+it writes into a pipe, so the script runs it with `PYTHONUNBUFFERED=1`. After
+15 quiet seconds (`--heartbeat SECONDS` changes this) it prints which type is
+still exporting and how many are done.
+
 ## Leaving out what the target can't hold yet
 
 Every run also writes three files next to the report, built from whatever is

@@ -13,6 +13,10 @@ Everything refused or failed is written to <config-dir>/export_report.json. pref
 reports each refused type with the admin-role permission it needs, so the gap shows in the readiness report
 instead of being found at deploy time.
 
+Progress is shown as it happens: each step says what it does, catocli's own line for every type appears as
+that type starts and finishes, and a "still working" line follows any quiet spell (a big policy can take a
+minute), so a long export never looks stalled.
+
 Usage:
   python3 scripts/export_source.py --profile source
   python3 scripts/export_source.py --profile source --config-dir config_data
@@ -24,25 +28,66 @@ import argparse
 import datetime
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 DENIED = re.compile(r"access denied|insufficient privileges|does not have sufficient permissions", re.I)
 PROGRESS = re.compile(r"^\[\d+/\d+\] (\S+): (.*)$")
 ABORTED = re.compile(r"ABORTING:.*access denied on '([^']+)'", re.I)
+START = time.monotonic()
 
 
-def _stream(cmd, env):
-    """Run cmd, echoing its output as it comes; return (exit code, output lines)."""
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    lines = []
-    for line in proc.stdout:
+def _clock(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def log(msg=""):
+    """This script's own lines, stamped with the time since it started, set apart from catocli's."""
+    print(f"[export_source {_clock(time.monotonic() - START)}] {msg}" if msg else "", flush=True)
+
+
+def _stream(cmd, env, heartbeat, on_line=None, quiet=None):
+    """Run cmd, echoing its output line by line as it comes; return (exit code, output lines).
+
+    Python children (catocli, export_webhooks.py) hold their output back when it goes to a pipe instead of a
+    terminal, so it all arrived at the end; PYTHONUNBUFFERED makes them hand over each line at once. When
+    nothing arrives for `heartbeat` seconds, quiet(seconds since the last line) supplies a "still working" line.
+    """
+    proc = subprocess.Popen(cmd, env=dict(env, PYTHONUNBUFFERED="1"), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True, bufsize=1)
+    lines_q = queue.Queue()
+
+    def pump():
+        for line in proc.stdout:
+            lines_q.put(line)
+        lines_q.put(None)
+
+    threading.Thread(target=pump, daemon=True).start()
+    lines, last, nudged = [], time.monotonic(), time.monotonic()
+    while True:
+        try:
+            line = lines_q.get(timeout=min(1.0, heartbeat / 4))
+        except queue.Empty:
+            now = time.monotonic()
+            if now - nudged >= heartbeat:
+                log(quiet(now - last) if quiet else f"Still working ({int(now - last)}s since the last update).")
+                nudged = now
+            continue
+        if line is None:
+            break
         sys.stdout.write(line)
         sys.stdout.flush()
         lines.append(line.rstrip("\n"))
+        last = nudged = time.monotonic()
+        if on_line:
+            on_line(line.rstrip("\n"))
     return proc.wait(), lines
 
 
@@ -70,12 +115,24 @@ def parse_run(lines):
     return seen, aborted
 
 
+def _account(profile):
+    """The account number the profile points at, for the opening line (None if it can't be read)."""
+    try:
+        sys.path.insert(0, SCRIPTS)
+        import cato_profile
+        return cato_profile.get_profile(profile).get("account_id")
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
     ap.add_argument("--profile", required=True, help="catocli profile of the current (source) account")
     ap.add_argument("--config-dir", default="config_data", help="where the export goes (default: config_data)")
     ap.add_argument("--no-webhooks", action="store_true", help="skip scripts/export_webhooks.py")
+    ap.add_argument("--heartbeat", type=float, default=15, metavar="SECONDS",
+                    help="after this many quiet seconds, print a line saying it's still working (default: 15)")
     args = ap.parse_args()
 
     catocli = shutil.which("catocli")
@@ -85,11 +142,39 @@ def main():
         return 1
     env = dict(os.environ, CATO_PROFILE=args.profile)
     base = [catocli, "export", "all", "--strip-ids", "--no-account-suffix", "--output-directory", args.config_dir]
+    n_steps = 2 if args.no_webhooks else 3
+
+    acct = _account(args.profile)
+    log(f"Exporting the current account (profile {args.profile}" + (f", account {acct}" if acct else "")
+        + f") into {args.config_dir}/. This only reads; it changes nothing in the account.")
+    remaining = export_types(catocli, env)  # empty if this catocli didn't say: one run of everything then
+    total = len(remaining)
+    log(f"Step 1 of {n_steps}: " + (f"{total} item types" if total else "every item type")
+        + " (policies, sites, groups and more) with catocli export all. Each type gets a line as it starts and "
+          "another as it finishes; a big one can take a minute or two.")
 
     results = {}  # type -> (ok, error)
-    remaining = export_types(catocli, env)  # empty if this catocli didn't say: one run of everything then
+    state = {"current": None, "since": time.monotonic()}
+
+    def track(line):
+        m = PROGRESS.match(line)
+        if m and m.group(2).startswith("exporting"):
+            state["current"], state["since"] = m.group(1), time.monotonic()
+        elif m:
+            results.setdefault(m.group(1), None)  # counted as done (the real result is parsed after the run)
+            state["current"] = None
+
+    def quiet_export(_):
+        done = sum(1 for v in results.values())
+        of = f"{done} of {total}" if total else f"{done}"
+        if state["current"]:
+            return (f"Still exporting {state['current']} ({int(time.monotonic() - state['since'])}s so far). "
+                    f"{of} types done.")
+        return f"Still working: {of} types done, waiting for catocli."
+
     while True:
-        code, lines = _stream(base + (["--types", ",".join(remaining)] if remaining else []), env)
+        code, lines = _stream(base + (["--types", ",".join(remaining)] if remaining else []), env,
+                              args.heartbeat, on_line=track, quiet=quiet_export)
         seen, aborted = parse_run(lines)
         results.update(seen)
         if not seen:  # nothing attempted: the pre-flight credential check failed, or catocli itself did
@@ -103,21 +188,33 @@ def main():
                 results["types after the refused one"] = (False, "catocli skipped them after an access denial")
             break
         denied = [t for t, (ok, e) in seen.items() if not ok and DENIED.search(e)]
-        print(f"\nexport_source.py: {', '.join(denied)} refused; carrying on with the "
-              f"{len(skipped)} type(s) catocli skipped.\n")
+        log()
+        log(f"{', '.join(denied)} refused for lack of permission (the check will name the permission). "
+            f"catocli stopped there, so carrying on with the {len(skipped)} type(s) it skipped.")
         remaining = skipped
+    results = {t: v for t, v in results.items() if v is not None}
+    ok_types = sum(1 for ok, _ in results.values() if ok)
+    log()
+    log(f"Step 1 done: {ok_types} of {len(results)} types exported.")
 
-    print("\nexport_source.py: static hosts on every site type")
+    log()
+    log(f"Step 2 of {n_steps}: static hosts on every site type (catocli export all only covers physical Socket "
+        "sites).")
     code, lines = _stream([catocli, "export", "static_hosts", "--site-type", "all", "-f", "json",
-                           "--output-directory", args.config_dir], env)
+                           "--output-directory", args.config_dir], env, args.heartbeat,
+                          quiet=lambda s: f"Still exporting static hosts ({int(s)}s since the last update).")
     results["static_hosts --site-type all"] = (code == 0, "" if code == 0 else next(
         (l for l in lines if "rror" in l or "denied" in l.lower()), f"exit code {code}"))
+    log("Step 2 done." if code == 0 else "Step 2 failed; the summary below has the error.")
     if not args.no_webhooks:
-        print("\nexport_source.py: webhooks, with their bodies")
+        log()
+        log(f"Step 3 of {n_steps}: webhooks, with their message bodies.")
         code, lines = _stream([sys.executable, os.path.join(SCRIPTS, "export_webhooks.py"), "--profile", args.profile,
-                               "--config-dir", args.config_dir], env)
+                               "--config-dir", args.config_dir], env, args.heartbeat,
+                              quiet=lambda s: f"Still exporting webhooks ({int(s)}s since the last update).")
         results["webhooks (export_webhooks.py)"] = (code == 0, "" if code == 0 else next(
             (l for l in lines if "rror" in l or "denied" in l.lower()), f"exit code {code}"))
+        log("Step 3 done." if code == 0 else "Step 3 failed; the summary below has the error.")
 
     refused = [{"type": t, "error": e} for t, (ok, e) in results.items() if not ok and DENIED.search(e)]
     failed = [{"type": t, "error": e} for t, (ok, e) in results.items() if not ok and not DENIED.search(e)]
@@ -127,16 +224,19 @@ def main():
         json.dump({"written_by": "export_source.py", "when": datetime.datetime.now().isoformat(timespec="seconds"),
                    "profile": args.profile, "exported": exported, "refused": refused, "failed": failed}, fh, indent=1)
 
-    print(f"\nexport_source.py: {len(exported)} exported, {len(refused)} refused for lack of permission, "
-          f"{len(failed)} failed. Details: {os.path.join(args.config_dir, 'export_report.json')}")
+    log()
+    log(f"Finished: {len(exported)} exported, {len(refused)} refused for lack of permission, {len(failed)} failed. "
+        f"Details: {os.path.join(args.config_dir, 'export_report.json')}")
     for r in refused:
-        print(f"  refused: {r['type']}")
+        log(f"  refused: {r['type']}")
     for f in failed:
-        print(f"  failed:  {f['type']}: {f['error'][:160]}")
+        log(f"  failed:  {f['type']}: {f['error'][:160]}")
     if refused:
-        print("The key's admin role is missing a permission for each refused type. The check lists them with the "
-              "permission each needs; add them to the role (or use a key from an admin whose role covers the whole "
-              "account), then run this again.")
+        log("The key's admin role is missing a permission for each refused type. The check lists them with the "
+            "permission each needs; add them to the role (or use a key from an admin whose role covers the whole "
+            "account), then run this again.")
+    if not failed:
+        log("Next: run the check (python3 scripts/preflight_check.py ...), as in the getting started guide.")
     return 1 if failed else 0
 
 
