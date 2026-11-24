@@ -374,6 +374,8 @@ def _ring(pct):
             f'<text x="90" y="112" text-anchor="middle" class="ring-sub">ready now</text></svg>')
 
 
+# Print sizes for code: Chrome-printed PDFs split "_" onto its own line when copied at some sizes
+# (9.6px and 8pt do; 9 to 13px in half-pixel steps do not). Check with a PDF text extract after changing them.
 CSS = """
 :root{--green:#128461;--moss:#006F53;--forest:#003E34;--pine:#002C28;--hl:#00FFCC;--coral:#FF3749;--sun:#FFC820;
 --pale:#F0F0F0;--light:#C8C8C8;--grey:#969696;--mid:#646464;--dark:#464646;--black:#000}
@@ -470,7 +472,7 @@ width:230px;max-height:calc(100vh - 48px);overflow:auto;font-size:13px;line-heig
 .sb p{margin:0 0 8px}
 .before{display:inline-block;font-size:12.5px;background:#fff2c6;color:#5c4500;border-radius:6px;padding:3px 9px;margin:0 0 8px}
 .cmd,.file{position:relative;background:var(--pine);border-radius:8px;margin:0 0 6px}
-.cmd pre,.file pre{margin:0;padding:10px 74px 10px 14px;color:#e8fff7;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.cmd pre,.file pre{margin:0;padding:10px 74px 10px 14px;color:#e8fff7;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow-x:auto}
 .file{background:#f4f7f6;border:1px solid #dfe7e4}.file pre{color:#1b1b1b;padding-right:14px}
 .flabel{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--moss);padding:8px 14px 0}
 .cmd button{position:absolute;top:7px;right:8px;font:600 12px Inter,sans-serif;color:var(--pine);background:var(--hl);border:0;border-radius:6px;padding:4px 10px;cursor:pointer}
@@ -484,7 +486,7 @@ footer img{height:20px;width:auto;flex:none}
 .summary{margin-top:22px;grid-template-columns:170px 1fr;gap:24px}.ring{width:160px;height:160px}
 .owner{margin-top:20px}.owner-head{margin-bottom:10px}.item{padding:10px 12px;margin-bottom:8px}
 .item ol{margin-top:2px}.names{font-size:11.5px;padding:6px 10px}.rules-by-policy{font-size:11px}
-.app-item{padding:7px 0}.code{font-size:11px}.cmd button{display:none}.cmd pre,.file pre{font-size:10.5px;padding-right:12px}
+.app-item{padding:7px 0}.code{font-size:11px}.cmd button{display:none}.cmd pre,.file pre{font-size:10.5px;padding-right:12px;white-space:pre-wrap}
 .step{margin-bottom:10px}.phase{font-size:16px;margin-top:18px}
 .toc-side,.totop{display:none!important}.toc{margin-top:14px;padding:10px 16px}.toc li{margin:1px 0}
 a{text-decoration:none}}
@@ -532,13 +534,22 @@ PURGE_KEYS = {
     "appTenantRestriction": "app_tenant_restriction", "antiMalwareFileHash": "anti_malware_file_hash",
     "sdpStaticIpAllocation": "sdp_static_ip_allocation", "siteWebProxy": "site_web_proxy",
 }
-# Target export in two halves: one long run can be cut off part way and still exit 0.
-EXPORT_HALVES = [
-    "allocated_ips,amfh_rules,ao_rules,apc_rules,atr_rules,cc_rules,custom_apps,dhcp_relay_groups,dia_rules,"
-    "fqdn_containers,global_ip_ranges,groups,if_rules,interconnect_sites,ip_range_containers,ipsec_sites,lan_fw_rules",
-    "mailing_lists,pa_rules,private_apps,app_connectors,rpf_rules,sb_rules,socket_sites,ssia_rules,st_rules,"
-    "subscription_groups,swp_rules,tls_rules,ts_rules,vsocket_sites,wf_rules,wnw_rules",
-]
+# Target export in parts: one long run can be cut off part way and still exit 0. Each part's --types list is
+# one shell word, so it is kept short enough to print on one line (a wrapped word breaks when copied from a PDF).
+EXPORT_TYPES = ("allocated_ips,amfh_rules,ao_rules,apc_rules,atr_rules,cc_rules,custom_apps,dhcp_relay_groups,dia_rules,"
+                "fqdn_containers,global_ip_ranges,groups,if_rules,interconnect_sites,ip_range_containers,ipsec_sites,"
+                "lan_fw_rules,mailing_lists,pa_rules,private_apps,app_connectors,rpf_rules,sb_rules,socket_sites,ssia_rules,"
+                "st_rules,subscription_groups,swp_rules,tls_rules,ts_rules,vsocket_sites,wf_rules,wnw_rules").split(",")
+
+
+def _type_parts(limit=72):
+    parts, cur = [], []
+    for t in EXPORT_TYPES:
+        if cur and len(",".join(cur + [t])) > limit:
+            parts.append(",".join(cur))
+            cur = []
+        cur.append(t)
+    return parts + [",".join(cur)]
 # Which action plan items belong before which deploy step.
 BEFORE_FOUNDATIONS = ("access_same_account", "export_incomplete", "export_hosts_short", "lic_ips_short", "lic_ips_unknown",
                       "lic_sites_short", "lic_sites_unknown", "lic_sites_none", "pop_missing", "feat_srt", "feat_wifi",
@@ -603,7 +614,9 @@ def build_runbook(rep, meta):
               f"python3 scripts/cato_profile.py {_q(sp)}", f"python3 scripts/cato_profile.py {_q(tp)}"]),
         step("guard", "Protect the current account",
              "This stops every script in the repo from changing the current account.",
-             [f"printf '{{\\n  \"protected_accounts\": [\"{sa}\"],\\n  \"protected_profiles\": [\"{sp}\"]\\n}}\\n' > cbcm.config.json"]),
+             # One printf argument per line of the file, so no single shell word is too long to print on one line.
+             [f"printf '%s\\n' '{{' '\"protected_accounts\": [\"{sa}\"],' '\"protected_profiles\": [\"{sp}\"]' "
+              f"'}}' > cbcm.config.json"]),
     ]
     exported = has("export_ok") and not has("export_incomplete", "export_hosts_short")
     prepare = [
@@ -702,10 +715,10 @@ def build_runbook(rep, meta):
              "Changes nothing. Every line should say ok, with 0 to add, change or delete.",
              [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode plan{mir} --config-dir {_q(tcfg)} --keep-going"]),
         step("export_target", "Export the new account",
-             "In two halves, because one long export can be cut off part way. Check the last lines of each say every "
+             "In parts, because one long export can be cut off part way. Check the last lines of each say every "
              "type succeeded.",
              [f"CATO_PROFILE={_q(tp)} catocli export all --no-account-suffix --output-directory {_q(vexp)} --types {h}"
-              for h in EXPORT_HALVES]
+              for h in _type_parts()]
              + [f"CATO_PROFILE={_q(tp)} catocli export static_hosts --site-type all -f json --output-directory {_q(vexp)}"]),
         step("compare", "Check rule order and content against the source",
              "A plan can't see either. The first should end with ALL ORDERING MATCHES. In the second, the only "
@@ -763,6 +776,43 @@ def build_runbook(rep, meta):
     return phases
 
 
+# A shell word: unquoted runs and quoted strings, glued together ("--customer 'A B'" is two words).
+_SHELL_WORD = re.compile(r"""(?:[^\s'"]+|'[^']*'|"(?:\\.|[^"\\])*")+""")
+CMD_WIDTH = 84
+
+
+def shell_lines(cmd, width=CMD_WIDTH):
+    """A long command broken at word boundaries with ' \\' continuations, never inside a word or a quote.
+
+    What a reader sees is then exactly what runs when they paste it: a PDF turns every
+    soft wrap into a hard line break when its text is copied, which splits commands.
+    A flag is kept with its value. Lines after the first are indented two spaces.
+    """
+    if len(cmd) <= width:
+        return cmd
+    words = _SHELL_WORD.findall(cmd)
+    units, i = [], 0
+    while i < len(words):
+        w = words[i]
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        if w.startswith("-") and nxt is not None and not nxt.startswith("-") and nxt not in ("&&", "||", "|", ";", ">"):
+            units.append(f"{w} {nxt}")
+            i += 2
+        else:
+            units.append(w)
+            i += 1
+    lines, cur = [], ""
+    for u in units:
+        cand = f"{cur} {u}" if cur else u
+        if cur and len(cand) + 2 > width:
+            lines.append(cur + " \\")
+            cur = "  " + u
+        else:
+            cur = cand
+    lines.append(cur)
+    return "\n".join(lines)
+
+
 def _inline(text):
     t = re.sub(r"`([^`]+)`", r"<code>\1</code>", _esc(text))
     return re.sub(r"\bstep (\d+)\b", r'<a href="#step-\1">step \1</a>', t)
@@ -788,7 +838,7 @@ def render_runbook_html(phases, item_nums):
                        f'<p>{_inline(s["text"])}</p>'
                        + (f'<div class="before">Before this step: item{"s" if len(nums) != 1 else ""} '
                           f'{_item_links(nums)}</div>' if nums else "")
-                       + "".join(f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(c)}</pre></div>'
+                       + "".join(f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(shell_lines(c))}</pre></div>'
                                  for c in s["cmds"])
                        + (f'<div class="file"><div class="flabel">File contents</div><pre>{_esc(s["file"])}</pre></div>'
                           if s.get("file") else "")

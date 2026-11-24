@@ -16,7 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from preflight_report import COPY_JS, _esc, _font_face, _logo, html_to_pdf  # noqa: E402
+from preflight_report import COPY_JS, _esc, _font_face, _logo, html_to_pdf, shell_lines  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TITLE = "Getting Started Guide to Account Migration"
@@ -47,6 +47,8 @@ EXPORT = [
 CHECK = ('python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf '
          '--customer "CUSTOMER NAME"')
 
+# Print sizes for code: Chrome-printed PDFs split "_" onto its own line when copied at some sizes
+# (9.6px and 8pt do; 9 to 13px in half-pixel steps do not). Check with a PDF text extract after changing them.
 CSS = """
 :root{--green:#128461;--moss:#006F53;--forest:#003E34;--pine:#002C28;--hl:#00FFCC;--pale:#F0F0F0;--mid:#646464;--dark:#464646}
 *{box-sizing:border-box}
@@ -78,7 +80,7 @@ p{margin:0 0 8px}
 .small code,.inl{font:12px ui-monospace,Menlo,Consolas,monospace;background:var(--pale);padding:1px 5px;border-radius:4px}
 .cap{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--moss);margin:8px 0 3px}
 .cmd{position:relative;background:var(--pine);border-radius:9px;margin:0 0 4px}
-.cmd pre{margin:0;padding:7px 72px 7px 12px;color:#e8fff7;font:11.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.cmd pre{margin:0;padding:7px 72px 7px 12px;color:#e8fff7;font:11.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre;overflow-x:auto}
 .cmd button{position:absolute;top:6px;right:7px;font:600 11.5px Inter,sans-serif;color:var(--pine);background:var(--hl);border:0;border-radius:6px;padding:3px 9px;cursor:pointer}
 .main-cmd{border:2px solid var(--green);border-radius:12px;padding:10px 12px 8px;margin:10px 0 6px;background:#f2faf6}
 .main-cmd .cap{margin-top:0}
@@ -89,16 +91,17 @@ p{margin:0 0 8px}
 footer{display:flex;gap:16px;align-items:center;margin:14px 34px 0;padding:12px 0 18px;border-top:1px solid #e3e3e3;font-size:11.5px;color:var(--mid)}
 footer img{height:18px;width:auto;flex:none}
 @page{size:A4;margin:0}
-@media print{body{font-size:12.5px}.hero{border-radius:0;padding:20px 28px 22px}.hero .top{margin-bottom:18px}
-.hero h1{font-size:28px}.hero p{font-size:13px}main{padding:0 28px}.step{padding-top:12px}h2{font-size:18px;margin-bottom:6px}
-.cmd button{display:none}.cmd pre{padding-right:12px;font-size:9.6px;line-height:1.45}.cap{margin-top:6px}.key{padding:8px 12px}.key span,.next span{font-size:12px}
+@media print{body{font-size:12px;line-height:1.45}.hero{border-radius:0;padding:16px 28px 18px}.hero .top{margin-bottom:12px}
+.hero h1{font-size:26px;margin:6px 0 6px}.hero p{font-size:12.5px}main{padding:0 28px}.step{padding-top:8px}h2{font-size:17px;margin:2px 0 5px}
+.keys{margin-bottom:6px}.main-cmd{margin:6px 0 2px;padding:7px 10px 5px}.next{margin-bottom:2px}.next div{padding-top:5px}
+.cmd button{display:none}.cmd pre{padding-right:12px;font-size:10px;line-height:1.45;white-space:pre-wrap}.cap{margin-top:6px}.key{padding:8px 12px}.key span,.next span{font-size:12px}
 .small{font-size:11.5px}footer{margin:10px 28px 0;padding:8px 0 0}}
 """
 
 
 def _cmds(lines):
     """One panel per group: a pasted block runs its lines in order (no comment lines, which zsh would reject)."""
-    return f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(chr(10).join(lines))}</pre></div>'
+    return f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(chr(10).join(shell_lines(c, 88) for c in lines))}</pre></div>'
 
 
 def render_html():

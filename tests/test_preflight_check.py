@@ -486,12 +486,79 @@ class GettingStartedGuide(unittest.TestCase):
         import subprocess
         import getting_started as gs
         out = gs.render_html()
+        import preflight_report as pr
         for needle in ("Getting Started Guide to Account Migration", 'class="cato-logo"', "@font-face",
-                       "Gather two API keys", "Run the check", "What to do next", gs.CHECK.replace('"', "&quot;")):
-            self.assertIn(needle, out)
+                       "Gather two API keys", "Run the check", "What to do next", pr._esc(pr.shell_lines(gs.CHECK, 88))):
+            self.assertTrue(needle in out, f"missing from the guide: {needle}")
         scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
         for script, line in (("preflight_check.py", gs.CHECK), ("export_webhooks.py", gs.EXPORT[-1])):
             helptext = subprocess.run([sys.executable, os.path.join(scripts, script), "--help"],
                                       capture_output=True, text=True).stdout
             for flag in re.findall(r"(--[a-z-]+)", line):
                 self.assertIn(flag, helptext, f"{script} has no {flag}")
+
+
+class PastedCommands(unittest.TestCase):
+    """Long commands are broken with ' \\' continuations: what is printed is exactly what runs when pasted."""
+
+    CMDS = [
+        "CATO_PROFILE=source catocli export all --strip-ids --no-account-suffix --output-directory config_data "
+        "--archive-directory config_data_archive",
+        'python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf '
+        '--customer "CUSTOMER NAME"',
+        "catocli configure set --profile 'new acct' --cato-token 'TARGET_API_KEY' --account-id 222 "
+        "--scim-url 'SCIM_URL' --scim-token 'SCIM_TOKEN'",
+        "printf '{\\n  \"protected_accounts\": [\"111\"],\\n  \"protected_profiles\": [\"src\"]\\n}\\n' > out.json",
+        "python3 -m json.tool config_data/groups.json > /dev/null && echo \"groups.json is fine\"",
+    ]
+
+    def _run(self, cmd):
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            script = 'args(){ printf "%s\\0" "$@"; }; args ' + cmd
+            r = subprocess.run(["bash", "-c", script], cwd=d, capture_output=True)
+            files = {n: open(os.path.join(d, n), "rb").read() for n in os.listdir(d)}
+            return r.stdout, files
+
+    def test_broken_commands_parse_the_same(self):
+        import preflight_report as pr
+        for cmd in self.CMDS:
+            shown = pr.shell_lines(cmd)
+            for line in shown.splitlines():
+                self.assertLessEqual(len(line), pr.CMD_WIDTH + 2, line)
+            for line in shown.splitlines()[:-1]:
+                self.assertTrue(line.endswith(" \\"), line)
+            self.assertEqual(self._run(shown), self._run(cmd), shown)
+
+    def test_runbook_and_guide_print_the_broken_form(self):
+        import getting_started as gs
+        import preflight_report as pr
+        out = gs.render_html()
+        self.assertIn(pr._esc(pr.shell_lines(gs.EXPORT[0], 88)), out)
+        self.assertIn("white-space:pre;", out)
+
+    def test_every_runbook_line_fits_and_the_guard_writes_json(self):
+        import json
+        import subprocess
+        import tempfile
+        import preflight_report as pr
+        meta = {"run": {"source_profile": "current-acct", "target_profile": "new-acct", "source_account": "1234567",
+                        "target_account": "7654321", "config_dir": "config_data", "target_config_dir": "config_data_target",
+                        "out_dir": "preflight", "probe": True, "customer": "Example Co", "lan_l7_confirmed": False,
+                        "provider_version": "2.0.0", "mirror": True}}
+        rep = pc.Report()
+        for k, ctx, items in (("feat_l7", {"n": 1, "sites": ["S"]}, ["x"]), ("feat_wifi", {"n": 1}, ["S:W"]),
+                              ("tgt_clash", {"n": 1, "families": ["internetFirewall"]}, ["internetFirewall: 1 (x)"])):
+            rep.add("features", "ACTION", k, ctx, "t", items=items)
+        cmds = [c for _, st in pr.build_runbook(rep, meta) for s in st for c in s["cmds"]]
+        for c in cmds:  # a word longer than a line would wrap in print and break when copied
+            for line in pr.shell_lines(c).splitlines():
+                self.assertLessEqual(len(line), pr.CMD_WIDTH + 2, line)
+        guard = [c for c in cmds if c.startswith("printf")][0]
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["bash", "-c", pr.shell_lines(guard)], cwd=d, check=True)
+            with open(os.path.join(d, "cbcm.config.json")) as fh:
+                self.assertEqual(json.load(fh), {"protected_accounts": ["1234567"], "protected_profiles": ["current-acct"]})
+        types = ",".join(c.split("--types ")[1] for c in cmds if "--types " in c).split(",")
+        self.assertEqual(sorted(types), sorted(pr.EXPORT_TYPES))  # every type still exported once
