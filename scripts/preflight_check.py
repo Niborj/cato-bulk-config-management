@@ -204,6 +204,11 @@ def load_tenant(api, with_policies=True):
     t["locations"] = {i["entity"]["name"] for i in locs["data"]["entityLookup"]["items"]}
     sites = api.q('query q($a:ID!){ entityLookup(accountID:$a, type: site, limit: 5000){ items{ entity{ id name } } } }')
     t["sites"] = {i["entity"]["name"] for i in sites["data"]["entityLookup"]["items"]}
+    try:  # names only; None when unreadable, so the 169.254.169.254 check falls back to "not there yet"
+        gr = api.q('query q($a:ID!){ object(accountId:$a){ globalIpRangeList{ items{ name } } } }')
+        t["global_ranges"] = {i["name"] for i in gr["data"]["object"]["globalIpRangeList"]["items"]}
+    except Exception:  # noqa: BLE001
+        t["global_ranges"] = None
     hosts = api.q('query q($a:ID!){ entityLookup(accountID:$a, type: host, limit: 1){ total } }')
     t["host_total"] = hosts["data"]["entityLookup"]["total"]
 
@@ -795,7 +800,17 @@ def check_cma_only(rep, refs, probes):
                     fix="Create them in the target CMA with exactly the same names before the policies.")
 
 
-def check_features(rep, exp, refs, probes):
+def _deps_state_has_ranges(folder=None):
+    """True once 0-dependencies has deployed its global IP ranges (local state)."""
+    path = os.path.join(folder or os.path.join(REPO_ROOT, "0-dependencies"), "terraform.tfstate")
+    try:
+        with open(path) as fh:
+            return '"cato_global_ip_ranges"' in fh.read()
+    except OSError:
+        return False
+
+
+def check_features(rep, exp, refs, probes, tgt=None, deps_deployed=None):
     cat = "features"
     rbi_rules = [f'{r["family"]}: {r["name"]}' for r in exp["rules"] if r["raw"].get("action") == "RBI"]
     if rbi_rules:
@@ -865,14 +880,35 @@ def check_features(rep, exp, refs, probes):
                     "LAN firewall cannot publish ('Can't use L7 with sites that don't have L7 enforcement enabled'). "
                     "The API cannot set it.")
 
-    waf = [g for g in exp["global_ip_ranges"] if "169.254.169.254" in json.dumps(g)]
+    # Ranges holding 169.254.169.254 can only be made by hand. 0-dependencies' first deploy sends every
+    # range it is given in one request (the API would block this one); after that it owns every range in
+    # the account, so a range that exists must NOT stay in global_ip_ranges_exclude or it plans to delete it.
+    waf = [g.get("name") for g in exp["global_ip_ranges"] if "169.254.169.254" in json.dumps(g)]
     if waf:
-        rep.leave_out |= {("globalIpRange", g.get("name")) for g in waf}
-        rep.exclude["global_ip_ranges_exclude"] |= {g.get("name") for g in waf}
-        rep.add(cat, "BLOCKER", "feat_waf_range", {"n": len(waf), "names": [g.get("name") for g in waf]}, "Global IP range(s) containing 169.254.169.254: the API's web firewall rejects any "
-                                "request that carries this address", items=[g.get("name") for g in waf],
-                fix="Create them by hand in the target CMA, then keep their names in `global_ip_ranges_exclude` "
-                    "(0-dependencies manages ALL global ranges and would otherwise try to recreate them).")
+        have = (tgt or {}).get("global_ranges") or set()
+        deployed = _deps_state_has_ranges() if deps_deployed is None else deps_deployed
+        todo = [n for n in waf if n not in have]
+        made = [n for n in waf if n in have]
+        if todo:
+            rep.leave_out |= {("globalIpRange", n) for n in todo}
+            rep.exclude["global_ip_ranges_exclude"] |= set(todo)
+            rep.add(cat, "BLOCKER", "feat_waf_range", {"n": len(todo), "names": todo}, "Global IP range(s) containing 169.254.169.254: the API's web firewall rejects any "
+                                    "request that carries this address", items=todo, rules=_rules_for(refs, "globalIpRange", todo),
+                    fix="Leave them out with `global_ip_ranges_exclude` (exclude-0-dependencies.auto.tfvars, written next to "
+                        "this report, does that) and create them by hand in the target CMA AFTER 0-dependencies has been "
+                        "deployed once. Then run the check again: it sees them, drops them from the exclusion file, and the "
+                        "rules that use them come back in.")
+        if made and deployed:
+            rep.add(cat, "OK", "feat_waf_range_done", {"n": len(made)}, f"{len(made)} range(s) the API firewall blocks exist in the target "
+                                "(made by hand) and stay in", items=made)
+        elif made:
+            rep.exclude["global_ip_ranges_exclude"] |= set(made)
+            rep.add(cat, "ACTION", "feat_waf_range_early", {"n": len(made), "names": made}, f"{len(made)} range(s) the API firewall blocks were made by hand "
+                                    "before 0-dependencies was ever deployed", items=made,
+                    fix="They stay in `global_ip_ranges_exclude` for the first deploy of 0-dependencies, which sends every "
+                        "range it is given in one request. Straight after that deploy, run the check again and copy the new "
+                        "exclude-0-dependencies.auto.tfvars before 0-dependencies is deployed again: from then on it owns "
+                        "every range in the account and would delete one it is told to leave out.")
 
     wifi = []
     for s in exp["sites"].values():
@@ -1156,7 +1192,7 @@ def main():
     check_pops(rep, exp, src, tgt, refs)
     check_identity(rep, exp, src, tgt, refs, tgt_api)
     check_cma_only(rep, refs, probes)
-    check_features(rep, exp, refs, probes)
+    check_features(rep, exp, refs, probes, tgt)
     check_integrity(rep, exp, src, refs)
     check_target_state(rep, exp, tgt)
     if probes and probes.get("error"):

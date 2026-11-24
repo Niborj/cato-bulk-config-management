@@ -204,7 +204,16 @@ def guide(f):
         return _g("cma_admin", f"Create {n} IP range{'s' if n != 1 else ''} in the CMA",
                   "This range includes 169.254.169.254, an address the Cato API doesn't accept for security reasons, so "
                   "it needs to be created by hand." + affects,
-                  ["In the CMA, create the range listed here with the same name and value."])
+                  ["Wait until your migration team tells you the shared objects (the first part of the migration) are in "
+                   "place. Creating it before then makes that step fail.",
+                   "Then, in the CMA, create the range listed here with the same name and value."])
+    if k == "feat_waf_range_early":
+        return _g("migration", f"Keep {n} hand-made IP range{'s' if n != 1 else ''} out of the first deploy",
+                  "This range was created by hand before the migration's first step. It includes 169.254.169.254, which the "
+                  "Cato API doesn't accept, so the first step has to leave it out and then take it over straight after.",
+                  ["Deploy the shared objects with the range left out.",
+                   "Run the check again straight away, and use its new exclusion file before the shared objects are "
+                   "deployed again."])
     if k == "feat_wifi":
         return _g("migration", f"Provide passwords for {n} Wi-Fi network{'s' if n != 1 else ''}",
                   "Wi-Fi passwords aren't included when configuration is exported.",
@@ -254,6 +263,7 @@ def ready_text(f):
         "feat_rbi_ok": "Cato RBI is enabled in the new account.",
         "feat_swp_ok": "Site Web Proxy rules can be created in the new account.",
         "feat_srt_ok": "Your network ranges don't need Static Range Translation.",
+        "feat_waf_range_done": "The IP ranges that had to be created by hand are in place.",
         "int_classic_done": f"{c.get('n')} legacy groups have already been recreated for the migration.",
         "int_ok": "Every site, range, application and IP address your rules name is in the export.",
     }.get(k, f["title"])

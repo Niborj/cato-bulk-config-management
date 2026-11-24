@@ -173,6 +173,17 @@ and they are rewritten to match. Missing CMA-only objects are only left out
 once a `--probe` run has proved them missing; without `--probe` they are an
 ACTION, not something to leave out.
 
+Ranges holding 169.254.169.254 need care with timing, because the
+`cato_global_ip_ranges` resource behaves differently before and after its first
+deploy. The first deploy sends every range it is given in one request, and the
+API blocks this address. After that it owns every range in the account, so a
+range that exists but is excluded gets planned for deletion. So the check
+keeps such a range excluded until it exists in the target **and**
+`0-dependencies` has been deployed (it looks for the resource in
+`0-dependencies/terraform.tfstate`). After that it drops it from the exclusion
+file and reports it as OK. A range made by hand before the first deploy stays
+excluded for that deploy, with an ACTION to rerun the check straight after.
+
 Wi-Fi passwords are never written to these files on purpose. `1-sites`
 accepts any value you give it, so a placeholder would go live as the real
 password. Put the real ones in `wifi_ssid_passkeys` yourself.

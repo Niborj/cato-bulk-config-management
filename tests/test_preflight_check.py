@@ -81,7 +81,7 @@ class Checks(unittest.TestCase):
                         "lan_interfaces": [], "wifi_ssids": []}}
         exp = export(sites=sites, ranges=[{"name": "Meta", "ipRange": "169.254.169.254/32"}])
         rep = pc.Report()
-        pc.check_features(rep, exp, {}, None)
+        pc.check_features(rep, exp, {}, None, deps_deployed=False)
         sev = {f["title"].split(" ")[0]: f["severity"] for f in rep.findings}
         self.assertEqual(sev.get("Global"), "BLOCKER")
         self.assertTrue(any(f["severity"] == "ACTION" and "Static Range Translation" in f["title"] for f in rep.findings))
@@ -143,7 +143,8 @@ class LeaveOut(unittest.TestCase):
         nr = {"name": "NR", "site": {"site": [{"name": "Branch-1"}], "group": []}}
         fw = {"family": "socketLan", "name": "NR :: FW", "raw": {"name": "FW", "application": {"customApp": [{"name": "A"}]}},
               "lan_firewall": True, "network_rule": nr}
-        pc.check_features(rep, export(rules=[fw], ranges=[{"name": "AzureVDI-2", "ipRange": "169.254.169.254/32"}]), {}, None)
+        pc.check_features(rep, export(rules=[fw], ranges=[{"name": "AzureVDI-2", "ipRange": "169.254.169.254/32"}]), {}, None,
+                          deps_deployed=False)
         rep.leave_out.add(("siteNetworkSubnet", "Site \\ LAN \\ It's a range"))  # backslashes and a quote
         return rep
 
@@ -173,6 +174,25 @@ class LeaveOut(unittest.TestCase):
             self.assertIn('global_ip_ranges_exclude = ["AzureVDI-2"]', tfv)
             self.assertIn("allocated_ips_exclude = []", tfv)
             self.assertNotIn("wifi", _read(os.path.join(d, "exclude-1-sites.auto.tfvars")))
+
+    def test_blocked_range_follows_the_first_deploy(self):
+        # 0-dependencies' first deploy sends every range in one request; afterwards it owns every range,
+        # so a hand-made range must be excluded before that deploy and must NOT be excluded after it.
+        exp = export(ranges=[{"name": "AzureVDI-2", "ipRange": "169.254.169.254/32"}])
+        cases = {  # (exists in target, 0-dependencies deployed) -> (severity, excluded, rules left out)
+            (False, False): ("BLOCKER", True, True),
+            (False, True): ("BLOCKER", True, True),
+            (True, False): ("ACTION", True, False),
+            (True, True): ("OK", False, False),
+        }
+        for (exists, deployed), (sev, excluded, left_out) in cases.items():
+            rep = pc.Report()
+            tgt = tenant(global_ranges={"AzureVDI-2"} if exists else set())
+            pc.check_features(rep, exp, {}, None, tgt, deps_deployed=deployed)
+            f = [x for x in rep.findings if x["key"].startswith("feat_waf_range")][0]
+            self.assertEqual(f["severity"], sev, (exists, deployed))
+            self.assertEqual("AzureVDI-2" in rep.exclude["global_ip_ranges_exclude"], excluded, (exists, deployed))
+            self.assertEqual(("globalIpRange", "AzureVDI-2") in rep.leave_out, left_out, (exists, deployed))
 
     def test_nothing_missing_still_writes_a_plain_copy_command(self):
         import tempfile
