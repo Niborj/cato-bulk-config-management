@@ -13,9 +13,11 @@ A Cato-branded, one-page copy to print or send: [getting-started-guide.pdf](gett
 | New account (the one you're moving to) | Edit | The check tests objects in a draft it deletes straight away. |
 
 Create each key in that account's Cato Management Application (CMA) under
-Resources > API Keys (Admin API Keys in newer versions), and copy it at once:
-it's shown only once. Note each account number too: it's the number after
-`/account/` in the CMA's address bar.
+Resources > API Keys (Admin API Keys in newer versions), signed in as an admin
+whose role covers the whole account (Viewer or Editor), and copy it at once:
+it's shown only once. A narrower role can't read every policy: the export then
+stops with "Access denied" and names the permission the role is missing. Note
+each account number too: it's the number after `/account/` in the CMA's address bar.
 
 ## 2. Run the check
 

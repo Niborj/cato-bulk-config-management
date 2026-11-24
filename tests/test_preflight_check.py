@@ -257,6 +257,50 @@ class GenericAccounts(unittest.TestCase):
         self.assertIn("floating subnet 'Roaming'", keys["int_unchecked"]["items"][0])
 
 
+class KeyPermissions(unittest.TestCase):
+    """A key whose role can't read every policy: the export stops at the first refusal, the deploy can't manage it."""
+
+    DENIED = {"error": "Exception while fetching data (/policy/socketBypass) : Access denied: Insufficient privileges "
+                       "for account 1234567"}
+
+    def test_source_key_missing_a_permission_is_named(self):
+        import preflight_report as pr
+        src = tenant(policies={"internetFirewall": {"enabled": True, "rules": ["A"]}, "socketBypass": self.DENIED})
+        tgt = tenant(policies={"internetFirewall": {"enabled": False, "rules": []}})
+        exp = export(rules=[rule("internetFirewall", "A")])
+        exp["policy_enabled"] = {"internetFirewall": True}
+        rep = pc.Report()
+        pc.check_permissions(rep, exp, src, tgt)
+        f = [x for x in rep.findings if x["key"] == "perm_source"][0]
+        self.assertEqual(f["severity"], "BLOCKER")
+        self.assertEqual(f["items"], ["socketBypass: needs the 'Socket Bypass' permission"])
+        g = pr.guide(f)
+        self.assertEqual(g["owner"], "cma_admin")
+        self.assertIn("Socket Bypass", g["why"])
+        self.assertIn("Socket Bypass.", g["steps"][0])
+        self.assertNotIn("perm_ok", [x["key"] for x in rep.findings])
+
+    def test_policy_left_out_of_the_export_is_a_blocker(self):
+        src = tenant(policies={"internetFirewall": {"enabled": True, "rules": ["A"]},
+                               "wanFirewall": {"enabled": True, "rules": ["B", "C"]}})
+        exp = export(rules=[rule("internetFirewall", "A")])
+        exp["policy_enabled"] = {"internetFirewall": True}
+        rep = pc.Report()
+        pc.check_permissions(rep, exp, src, tenant(policies={"wanFirewall": {"enabled": False, "rules": []}}))
+        f = [x for x in rep.findings if x["key"] == "export_policy_missing"][0]
+        self.assertEqual(f["items"], ["wanFirewall: 2 rules"])
+        self.assertIn("perm_ok", [x["key"] for x in rep.findings])
+
+    def test_target_key_denied_is_one_blocker_not_a_warning_too(self):
+        tgt = tenant(policies={"socketBypass": self.DENIED})
+        rep = pc.Report()
+        pc.check_permissions(rep, export(), tenant(policies={}), tgt)
+        pc.check_target_state(rep, export(), tgt)
+        keys = [x["key"] for x in rep.findings]
+        self.assertIn("perm_target", keys)
+        self.assertNotIn("tgt_unreadable", keys)
+
+
 class ScimEndpoint(unittest.TestCase):
     """The SCIM check against a local stand-in for the Cato SCIM app."""
 

@@ -105,6 +105,18 @@ POLICY_FAMILIES = [
     "sdpStaticIpAllocation", "siteWebProxy", "antiMalwareFileHash", "terminalServer",
 ]
 
+# The CMA role permission each policy's API needs (api.catonetworks.com/documentation, "Required Permissions").
+POLICY_PERMISSION = {
+    "internetFirewall": "Internet Firewall", "wanFirewall": "WAN Firewall", "wanNetwork": "Network Rules",
+    "applicationControl": "Application Control", "tlsInspect": "TLS Inspection", "socketBypass": "Socket Bypass",
+    "socketLan": "Socket LAN Network", "clientConnectivity": "Client Connectivity Policy",
+    "privateAccess": "Private Access Policy", "splitTunnel": "SDP Split Tunnel", "appTenantRestriction": "Application Control",
+    "ztnaAlwaysOn": "Always On Policy", "dynamicIpAllocation": "SDP IP Allocation Policy",
+    "remotePortFwd": "Remote Port Forwarding", "sdpStaticIpAllocation": "SDP IP Allocation Policy",
+    "siteWebProxy": "Site Web Proxy", "antiMalwareFileHash": "Anti Malware", "terminalServer": "User Awareness",
+}
+_DENIED = re.compile(r"access denied|insufficient privileges|permission", re.I)
+
 # Export files the bulk folders read (catocli export all + static hosts + webhooks).
 EXPECTED_EXPORT_FILES = [
     "socket_sites.json", "vsocket_sites.json", "ipsec_sites.json", "groups.json",
@@ -556,6 +568,39 @@ def run_probes(api, refs, export, log):
 # --------------------------------------------------------------------------
 # Checks
 # --------------------------------------------------------------------------
+def check_permissions(rep, exp, src, tgt):
+    """Policies a key can't read: the export stops at the first one, and a target key that can't read a policy
+    can't deploy it either. Also policies the source has that the export lacks (an export cut short)."""
+    cat = "access"
+    for side, t, key in (("source", src, "perm_source"), ("target", tgt, "perm_target")):
+        denied = sorted(f for f, info in (t.get("policies") or {}).items()
+                        if "error" in info and _DENIED.search(info["error"]))
+        if denied:
+            perms = sorted({POLICY_PERMISSION.get(f, f) for f in denied})
+            who = "current (source)" if side == "source" else "new (target)"
+            rep.add(cat, "BLOCKER", key, {"n": len(denied), "families": denied, "permissions": perms},
+                    f"The {who} account's API key cannot read {_pl(len(denied), 'policy', 'policies')}",
+                    items=[f"{f}: needs the '{POLICY_PERMISSION.get(f, f)}' permission" for f in denied],
+                    fix=("Use a key from an admin whose role can view the whole account (the predefined Viewer or Editor "
+                         "role), or add these permissions to the key's role in the CMA, then export again. "
+                         "`catocli export all` stops at the first policy it is refused, so everything after it is "
+                         "missing too." if side == "source" else
+                         "Use a key from an admin whose role can edit the whole account (the predefined Editor role), or "
+                         "add these permissions to the key's role in the CMA. A key that can't read a policy can't "
+                         "deploy it either."))
+    readable = {f: info for f, info in (src.get("policies") or {}).items() if "error" not in info}
+    missing = sorted(f for f, info in readable.items() if info.get("rules") and f not in exp["policy_enabled"])
+    if missing:
+        rep.add("export", "BLOCKER", "export_policy_missing", {"n": len(missing)},
+                f"{_pl(len(missing), 'policy', 'policies')} with rules in the source are missing from the export",
+                items=[f"{f}: {_pl(len(readable[f]['rules']), 'rule')}" for f in missing],
+                fix="Export again and check its summary says every type succeeded (it can stop part way). Without "
+                    "these files the migration silently leaves the policies out.")
+    if src.get("policies") and tgt.get("policies") and not any(
+            k in ("perm_source", "perm_target") for k in (f["key"] for f in rep.findings)):
+        rep.add(cat, "OK", "perm_ok", {}, "Both API keys can read every policy")
+
+
 def check_access(rep, src, tgt):
     cat = "access"
     sa, ta = src["account"], tgt["account"]
@@ -1065,7 +1110,9 @@ def check_target_state(rep, exp, tgt):
     clashes, existing = [], []
     for fam, info in tgt["policies"].items():
         if "error" in info:
-            rep.add(cat, "WARN", "tgt_unreadable", {"family": fam}, f"Could not read the target's {fam} policy", detail=info["error"][:200])
+            if not _DENIED.search(info["error"]):  # access denied is a perm_target BLOCKER (check_permissions)
+                rep.add(cat, "WARN", "tgt_unreadable", {"family": fam}, f"Could not read the target's {fam} policy",
+                        detail=info["error"][:200])
             continue
         names = set(info["rules"])
         if names:
@@ -1286,7 +1333,7 @@ def main():
     log(f"reading source export from {args.config_dir}")
     exp = load_export(args.config_dir)
     log(f"reading source tenant {src_api.account} ({args.source_profile})")
-    src = load_tenant(src_api, with_policies=False)
+    src = load_tenant(src_api)  # read-only; tells us which policies the source key can't read
     log(f"reading target tenant {tgt_api.account} ({args.target_profile})")
     tgt = load_tenant(tgt_api)
     refs = collect_refs(exp["rules"])
@@ -1298,6 +1345,7 @@ def main():
 
     rep = Report()
     check_access(rep, src, tgt)
+    check_permissions(rep, exp, src, tgt)
     check_export(rep, exp, src)
     check_licensing(rep, exp, src, tgt)
     check_pops(rep, exp, src, tgt, refs)

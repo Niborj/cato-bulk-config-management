@@ -91,6 +91,26 @@ def guide(f):
                   "section are what your current configuration uses.",
                   ["Share the license items in this section with your Cato account team and confirm each one is in place "
                    "before the migration date."])
+    if k in ("perm_source", "perm_target"):
+        perms = c.get("permissions") or []
+        names = ", ".join(FAMILY_NAMES.get(x, x) for x in c.get("families") or [])
+        if k == "perm_source":
+            return _g("cma_admin", f"Let the current account's API key read {_pl(n, 'more policy', 'more policies')}",
+                      f"The key can't read {names}, so the export stops there and everything after it is missing too.",
+                      ["Create the key as an admin whose role can view the whole account (the predefined Viewer or "
+                       "Editor role), or add " + ("this permission" if len(perms) == 1 else "these permissions")
+                       + " to its role: " + ", ".join(perms) + ".",
+                       "Then export the current account again."])
+        return _g("cma_admin", f"Let the new account's API key manage {_pl(n, 'more policy', 'more policies')}",
+                  f"The key can't read {names}, so it can't migrate " + ("it" if n == 1 else "them") + " either.",
+                  ["Create the key as an admin whose role can edit the whole account (the predefined Editor role), or "
+                   "add " + ("this permission" if len(perms) == 1 else "these permissions") + " to its role: "
+                   + ", ".join(perms) + "."])
+    if k == "export_policy_missing":
+        return _g("migration", f"Export {_pl(n, 'missing policy', 'missing policies')} again",
+                  "These policies have rules in your current account but aren't in the export, so the migration would "
+                  "leave them out.",
+                  ["Export the current account again and check every type succeeded."])
     if k == "access_same_account":
         return _g("migration", "Choose a different target account", "The source and target are the same account.")
     if k in ("export_incomplete", "export_hosts_short", "export_no_rules"):
@@ -319,6 +339,7 @@ def ready_text(f):
                        f"{'exists' if c.get('n') == 1 else 'exist'} in the new account.",
         "lic_sites_ok": f"The new account has enough site licenses and pooled bandwidth for your {_pl(c.get('need', 0), 'licensed site')}.",
         "feat_rbi_ok": "Cato RBI is enabled in the new account.",
+        "perm_ok": "Both API keys can read every policy.",
         "feat_swp_ok": "Site Web Proxy rules can be created in the new account.",
         "feat_srt_ok": "Your network ranges don't need Static Range Translation.",
         "feat_waf_range_done": "The IP ranges that had to be created by hand are in place.",
@@ -554,7 +575,7 @@ def _type_parts(limit=72):
         cur.append(t)
     return parts + [",".join(cur)]
 # Which action plan items belong before which deploy step.
-BEFORE_FOUNDATIONS = ("access_same_account", "export_incomplete", "export_hosts_short", "lic_ips_short", "lic_ips_unknown",
+BEFORE_FOUNDATIONS = ("access_same_account", "perm_source", "perm_target", "export_policy_missing", "export_incomplete", "export_hosts_short", "lic_ips_short", "lic_ips_unknown",
                       "lic_sites_short", "lic_sites_unknown", "lic_sites_none", "pop_missing", "feat_srt", "feat_wifi",
                       "feat_webhooks", "int_classic", "tgt_existing_named", "access_trial")
 BEFORE_POLICIES = ("id_missing", "id_scim_inactive", "id_ldap_inactive", "id_scim_endpoint_fail", "cma_missing",

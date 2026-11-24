@@ -132,8 +132,10 @@ def render_html():
 <div class="key">{ICON_EDIT}<div><div class="perm">Edit</div><b>New account</b><span>The one you're moving to. The check tests objects in a draft it deletes straight away.</span></div></div>
 </div>
 <p class="small">Create each key in that account's Cato Management Application (CMA) under Resources &gt; API Keys
-(Admin API Keys in newer versions), and copy it at once: it's shown only once. Note each account number too:
-it's the number after <code>/account/</code> in the CMA's address bar.</p>
+(Admin API Keys in newer versions), signed in as an admin whose role covers the whole account (Viewer or Editor), and
+copy it at once: it's shown only once. A narrower role can't read every policy: the export then stops with
+"Access denied" and names the permission the role is missing. Note each account number too: it's the number after
+<code>/account/</code> in the CMA's address bar.</p>
 </div></section>
 
 <section class="step"><div class="disc">2</div><div>
