@@ -16,7 +16,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from preflight_report import COPY_JS, _esc, _font_face, _logo, html_to_pdf  # noqa: E402
+from preflight_report import COPY_JS, _esc, _font_face, _logo, chain, html_to_pdf  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TITLE = "Getting Started Guide to Account Migration"
@@ -52,9 +52,14 @@ EXPORT = [
 CHECK = "python3 scripts/preflight_check.py --source-profile source --target-profile target --probe --pdf"
 
 
-def block(lines):
-    """The text of one block: the commands chained with "&&", one per line."""
-    return "\n".join(c + (" &&" if i < len(lines) - 1 else "") for i, c in enumerate(lines))
+def block(lines, sep="&&"):
+    """The text of one block, one command per line (see preflight_report.chain)."""
+    return chain(lines, sep)
+
+
+# The export block runs every command even if the first is partly refused (a key whose role lacks one policy
+# permission): "&&" would skip the static hosts and webhooks too.
+SEPARATOR = {"EXPORT": ";"}
 
 
 # Print sizes for code: Chrome-printed PDFs split "_" onto its own line when copied at some sizes
@@ -109,9 +114,9 @@ footer img{height:18px;width:auto;flex:none}
 """
 
 
-def _cmds(lines):
+def _cmds(lines, sep="&&"):
     """One panel per block (no comment lines, which zsh rejects when pasted)."""
-    return f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(block(lines))}</pre></div>'
+    return f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(block(lines, sep))}</pre></div>'
 
 
 def render_html():
@@ -144,7 +149,7 @@ copy it at once: it's shown only once. A narrower role can't read every policy: 
 single quotes around each key, and paste each block whole: it runs as one.</p>
 <div class="cap">Once per computer</div>{_cmds(ONCE_PER_COMPUTER)}
 <div class="cap">Once per pair of accounts</div>{_cmds(ONCE_PER_PAIR)}
-<div class="cap">Export the current account (read-only, a few minutes)</div>{_cmds(EXPORT)}
+<div class="cap">Export the current account (read-only, a few minutes)</div>{_cmds(EXPORT, SEPARATOR["EXPORT"])}
 <div class="main-cmd"><div class="cap">The check: the one to remember, and to run again after every fix</div>{_cmds([CHECK])}</div>
 </div></section>
 

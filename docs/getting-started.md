@@ -43,9 +43,9 @@ catocli configure set --profile target --cato-token 'NEW_KEY' --account-id NEW_N
 Export the current account (read-only, a few minutes):
 
 ```bash
-export CATO_PROFILE=source &&
-catocli export all --strip-ids --no-account-suffix --output-directory config_data &&
-catocli export static_hosts --site-type all -f json --output-directory config_data &&
+export CATO_PROFILE=source;
+catocli export all --strip-ids --no-account-suffix --output-directory config_data;
+catocli export static_hosts --site-type all -f json --output-directory config_data;
 python3 scripts/export_webhooks.py --profile source --config-dir config_data
 ```
 

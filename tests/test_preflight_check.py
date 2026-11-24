@@ -553,14 +553,18 @@ class PastedCommands(unittest.TestCase):
         import shlex
         import subprocess
         import getting_started as gs
-        for lines in (gs.ONCE_PER_COMPUTER, gs.ONCE_PER_PAIR, gs.EXPORT, [gs.CHECK]):
-            text = gs.block(lines)
+        for lines, sep in ((gs.ONCE_PER_COMPUTER, "&&"), (gs.ONCE_PER_PAIR, "&&"), (gs.EXPORT, gs.SEPARATOR["EXPORT"]),
+                           ([gs.CHECK], "&&")):
+            text = gs.block(lines, sep)
             for line in text.splitlines():
                 self.assertLessEqual(len(line), gs.LINE_MAX, line)  # never wraps, so never needs a continuation
                 self.assertFalse(line.endswith("\\"), line)
             flat = text.replace("\n", " ")
             self.assertEqual(shlex.split(text), shlex.split(flat))
-            self.assertEqual(shlex.split(flat).count("&&"), sum(c.count("&&") for c in lines) + len(lines) - 1)
+            if sep == "&&":
+                self.assertEqual(shlex.split(flat).count("&&"), sum(c.count("&&") for c in lines) + len(lines) - 1)
+            else:
+                self.assertEqual(text.count(";\n"), len(lines) - 1)
             for form in (text, flat):
                 self.assertEqual(subprocess.run(["bash", "-n", "-c", form]).returncode, 0, form)
                 self.assertEqual(subprocess.run(["zsh", "-n", "-c", form]).returncode, 0, form)
@@ -590,7 +594,7 @@ class PastedCommands(unittest.TestCase):
             for s in st:
                 if not s["cmds"]:
                     continue
-                text = pr.chain(s["cmds"])
+                text = pr.chain(s["cmds"], s.get("sep", "&&"))
                 for line in text.splitlines():
                     self.assertLessEqual(len(line), pr.CMD_LINE_MAX, line)  # prints whole, never needs a continuation
                     self.assertFalse(line.endswith("\\"), line)

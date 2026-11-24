@@ -664,6 +664,9 @@ def build_runbook(rep, meta):
              before=("export_incomplete", "export_hosts_short"),
              note=("Already done for this report. Run it again if the current account changes, then run the check "
                    "again.") if exported else None),
+    ]
+    setup[-1]["sep"] = ";"  # a type refused for lack of permission must not stop the static hosts and webhooks
+    setup += [
         step("firstcheck", "Run the check on this machine",
              f"Writes this report and {script_path}, which runs every step from here on. Already done on the "
              "machine that made this report.", [check_first]),
@@ -828,10 +831,13 @@ CMD_LINE_MAX = 100  # longest command line Part 2 prints (10px code fits ~104 on
 # print, and a wrapped line breaks when copied
 
 
-def chain(cmds):
-    """Commands one per line, every line but the last ending in "&&": pasted with line breaks the shell carries
-    on after "&&", pasted by a PDF viewer that turns line breaks into spaces it is the same chain on one line."""
-    return "\n".join(c + (" &&" if i < len(cmds) - 1 else "") for i, c in enumerate(cmds))
+def chain(cmds, sep="&&"):
+    """Commands one per line, every line but the last ending in "&&" (or ";"): pasted with line breaks the shell
+    carries on after "&&", pasted by a PDF viewer that turns line breaks into spaces it is the same chain on one
+    line. ";" runs every command whatever the one before returned: for exports, where one partly refused type
+    must not stop the rest."""
+    end = " &&" if sep == "&&" else ";"
+    return "\n".join(c + (end if i < len(cmds) - 1 else "") for i, c in enumerate(cmds))
 
 
 def _sq(cmd):
@@ -925,7 +931,7 @@ def render_runbook_html(phases, item_nums):
                        f'<p>{_inline(s["text"])}</p>'
                        + (f'<div class="before">Before this step: item{"s" if len(nums) != 1 else ""} '
                           f'{_item_links(nums)}</div>' if nums else "")
-                       + (f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(chain(s["cmds"]))}</pre></div>'
+                       + (f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(chain(s["cmds"], s.get("sep", "&&")))}</pre></div>'
                           if s["cmds"] else "")
                        + (f'<div class="runs"><div class="flabel">What it runs (for reference)</div>'
                           f'<pre>{_esc(chr(10).join(s["runs"]))}</pre></div>' if s.get("runs") else "")
@@ -950,7 +956,7 @@ def render_runbook_md(phases, titles=None):
             if s["before"] and titles:
                 out += ["Before this step: " + "; ".join(titles[k] for k in s["before"] if k in titles) + ".", ""]
             if s["cmds"]:
-                out += ["```bash", chain(s["cmds"]), "```", ""]
+                out += ["```bash", chain(s["cmds"], s.get("sep", "&&")), "```", ""]
             if s.get("runs"):
                 out += ["What it runs (for reference):", "", "```text", *s["runs"], "```", ""]
             if s.get("file"):
