@@ -231,7 +231,7 @@ Wi-Fi passwords are never written to these files on purpose. `1-sites`
 accepts any value you give it, so a placeholder would go live as the real
 password. Put the real ones in `wifi_ssid_passkeys` yourself.
 
-Tested against greenfield_2: the generated command left out exactly the 100
+Tested against a fresh trial target: the generated command left out exactly the 100
 rules the check flags (98 behind BLOCKERs plus the 2 Layer 7 rules), and the
 two exclusion files matched the ones written by hand for the first run.
 

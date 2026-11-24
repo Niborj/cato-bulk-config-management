@@ -216,7 +216,7 @@ class LeaveOut(unittest.TestCase):
 
 
 class GenericAccounts(unittest.TestCase):
-    """Things Reference Arch never used but other accounts will."""
+    """Things the reference tenant never used but other accounts will."""
 
     def test_aliased_references_count_as_their_object(self):
         import scope_policies_to_target as sp
