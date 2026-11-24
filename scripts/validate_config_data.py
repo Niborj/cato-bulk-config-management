@@ -475,6 +475,11 @@ def check_dependency_list(report, directory, filename, required_keys, id_keys=No
             report.error(f"{filename}: item[{i}] is not an object")
             continue
         for key in required_keys:
+            # An empty members list is legitimate: the API accepts a group with
+            # no members (it matches nothing), and source tenants do have them.
+            # Only a missing/non-list members key is structurally broken.
+            if key == "members" and isinstance(item.get(key), list):
+                continue
             if not item.get(key):
                 report.error(f"{filename}: item[{i}] (name={item.get(name_key)!r}) missing required key {key!r}")
         if id_keys:

@@ -555,6 +555,12 @@ def main():
     # Point every folder's config_data_dir variable at the resolved (absolute)
     # config dir, so --config-dir redirects all the folders' file() reads.
     env["TF_VAR_config_data_dir"] = config_dir
+    # wan-network and remote-port-forward read their files through their own
+    # *_json_file_path variables (repo-relative defaults), NOT config_data_dir,
+    # so without these --config-dir silently did not redirect those two folders.
+    env["TF_VAR_wnw_rules_json_file_path"] = os.path.join(config_dir, "all_wnw_rules_and_sections.json")
+    env["TF_VAR_rpf_rules_json_file_path"] = os.path.join(config_dir, "all_rpf_rules_and_sections.json")
+    env["TF_VAR_allocated_ips_json_file_path"] = os.path.join(config_dir, "allocated_ips.json")
     if args.mode in ("plan", "deploy", "destroy"):
         # The provider's cleanupDrafts fires a policyPrivateAccessDiscardRevision
         # mutation on first Configure (see docs/release-instructions.md) -- it can
