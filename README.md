@@ -210,6 +210,7 @@ Everything else under `config_data/` is gitignored (point-in-time tenant data).
 | Script | Purpose |
 |---|---|
 | `scripts/bulk_apply.py` | Plan/apply/deploy/destroy every folder in order |
+| `scripts/preflight_check.py` | Before-you-migrate dependency check: compares source and target (licences, PoPs, SCIM/IdP users and groups, CMA-only objects, features, factory rules) and lists what to enable or create first. See [docs/preflight-check.md](docs/preflight-check.md) |
 | `scripts/purge_all.py` + `scripts/purge/` | Clear all policies/dependencies from a TARGET tenant |
 | `scripts/scim_sync.py` | Export/push/purge SCIM users + groups |
 | `scripts/validate_config_data.py` | Lint `config_data/` before a plan/apply |

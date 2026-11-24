@@ -57,3 +57,5 @@ tmp
 
 config_data
 config_data_archive
+# preflight_check.py reports (tenant data)
+preflight/
