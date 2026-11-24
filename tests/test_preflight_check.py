@@ -2,6 +2,7 @@
 
 Run: python3 -m unittest discover -s tests -v
 """
+import json
 import os
 import re
 import sys
@@ -882,3 +883,62 @@ class UnbuildableCustomApps(unittest.TestCase):
         self.assertIn("'Empty'): it has no criteria, which the Cato Terraform provider refuses", rep.errors[0])
         self.assertIn("'HQ'): one of its criteria is only 'any protocol'", rep.errors[1])
         self.assertFalse(any("missing required key 'criteria'" in e for e in rep.errors))
+
+
+class NativeRangeShape(unittest.TestCase):
+    """Some exports leave a site's native range details on its LAN interface (only the subnet on the site), so the
+    site modules miss the local IP. export_source.py restates them in the usual shape, adding and dropping nothing."""
+
+    def _native(self, subnet, local_ip, **kw):
+        return dict({"name": "Native Range", "subnet": subnet, "vlan": None, "mdns_reflector": False, "gateway": None,
+                     "range_type": "VLAN", "translated_subnet": subnet, "internet_only": False, "local_ip": local_ip,
+                     "interface_index": "LAN1", "dhcp_settings": {"dhcp_type": "ACCOUNT_DEFAULT"}, "native_range": True}, **kw)
+
+    def _site(self, extra=()):
+        return {"name": "Branch", "native_range": {"subnet": "192.168.5.0/24", "range_name": "Native Range"},
+                "lan_interfaces": [{"name": "LAN 01", "index": "LAN1", "dest_type": "LAN",
+                                    "network_ranges": [*extra, self._native("192.168.5.0/24", "192.168.5.1")]}]}
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
+        import export_source
+        self.es = export_source
+
+    def test_details_move_to_the_site_and_the_interface_becomes_the_default_lan(self):
+        extra = {"name": "Network 2", "subnet": "10.60.8.0/24", "range_type": "Direct", "local_ip": "10.60.8.1",
+                 "native_range": None}
+        s = self._site(extra=[extra])
+        self.assertTrue(self.es.lift_native_range(s))
+        nr = s["native_range"]
+        self.assertEqual((nr["subnet"], nr["local_ip"], nr["index"], nr["interface_name"], nr["dest_type"]),
+                         ("192.168.5.0/24", "192.168.5.1", "LAN1", "LAN 01", "LAN"))
+        self.assertEqual(nr["dhcp_settings"], {"dhcp_type": "ACCOUNT_DEFAULT"})
+        self.assertEqual(s["lan_interfaces"], [{"default_lan": True, "network_ranges": [extra]}])  # other ranges stay
+        self.assertFalse(self.es.lift_native_range(s))  # already in the usual shape: unchanged on a second pass
+
+    def test_the_usual_shape_and_unmatched_subnets_are_left_alone(self):
+        usual = {"name": "HQ", "native_range": {"subnet": "10.10.10.0/24", "local_ip": "10.10.10.1", "index": "INT_5"},
+                 "lan_interfaces": [{"default_lan": True, "network_ranges": []}]}
+        before = json.dumps(usual)
+        self.assertFalse(self.es.lift_native_range(usual))
+        self.assertEqual(json.dumps(usual), before)
+        other = self._site()
+        other["lan_interfaces"][0]["network_ranges"][0]["subnet"] = "10.9.9.0/24"  # not the site's native subnet
+        self.assertFalse(self.es.lift_native_range(other))
+
+    def test_normalize_only_rewrites_an_existing_export_without_catocli(self):
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        with open(os.path.join(d, "socket_sites.json"), "w") as fh:
+            json.dump({"sites": [self._site()]}, fh)
+        with open(os.path.join(d, "vsocket_sites.json"), "w") as fh:
+            json.dump({"sites": []}, fh)
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "export_source.py")
+        r = subprocess.run([sys.executable, script, "--normalize-only", "--config-dir", d], capture_output=True,
+                           text=True, env=dict(os.environ, PATH="/nonexistent"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Restated the native range of 1 site(s)", r.stdout)
+        with open(os.path.join(d, "socket_sites.json")) as fh:
+            self.assertEqual(json.load(fh)["sites"][0]["native_range"]["local_ip"], "192.168.5.1")

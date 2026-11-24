@@ -9,6 +9,11 @@ denied", for example a role without the "Socket Bypass" permission), skipping ev
 script records that type as refused and runs `export all` again for the types it skipped, until every type
 has been tried. A newer catocli that carries on by itself needs only the one run.
 
+Some exports leave a site's native range details (local IP, DHCP and the rest) on its LAN interface instead of
+on the site, with only the subnet on the site; the site modules then miss the local IP. This script restates those
+sites in the usual shape: the details on the site's native_range, and that interface as the default LAN. Nothing
+is added or dropped. --normalize-only does just that to an existing export, with no API calls.
+
 Everything refused or failed is written to <config-dir>/export_report.json. preflight_check.py reads it and
 reports each refused type with the admin-role permission it needs, so the gap shows in the readiness report
 instead of being found at deploy time.
@@ -20,6 +25,7 @@ minute), so a long export never looks stalled.
 Usage:
   python3 scripts/export_source.py --profile source
   python3 scripts/export_source.py --profile source --config-dir config_data
+  python3 scripts/export_source.py --normalize-only --config-dir config_data
 
 Exit code: 0 when every type exported or was refused for lack of permission (the check reports those),
 1 when anything else failed.
@@ -115,6 +121,62 @@ def parse_run(lines):
     return seen, aborted
 
 
+SITE_FILES = ("socket_sites.json", "vsocket_sites.json")
+NATIVE_FIELDS = ("vlan", "mdns_reflector", "gateway", "range_type", "translated_subnet", "internet_only", "local_ip",
+                 "dhcp_settings")
+
+
+def lift_native_range(site):
+    """Restate one site's native range in the shape the site modules read; True if it changed.
+
+    The usual shape has every detail on site["native_range"] and the interface that carries it listed as
+    {"default_lan": true, "network_ranges": [its other ranges]}. Some exports (sites with no WAN interfaces among
+    them) give the site only the native subnet and leave the details on a LAN interface's range flagged
+    native_range: true. Move them up; nothing is added or dropped.
+    """
+    nr = site.get("native_range") or {}
+    lans = site.get("lan_interfaces") or []
+    if not nr.get("subnet") or nr.get("local_ip") or any(li.get("default_lan") for li in lans):
+        return False
+    for i, li in enumerate(lans):
+        ranges = li.get("network_ranges") or []
+        native = next((r for r in ranges if r.get("native_range") is True and r.get("subnet") == nr["subnet"]), None)
+        if native is None:
+            continue
+        site["native_range"] = dict(nr, range_name=nr.get("range_name") or native.get("name"),
+                                    interface_name=li.get("name"), index=li.get("index") or native.get("interface_index"),
+                                    dest_type=li.get("dest_type"), lag_min_links=li.get("lag_min_links"),
+                                    **{k: native.get(k) for k in NATIVE_FIELDS})
+        lans[i] = {"default_lan": True, "network_ranges": [r for r in ranges if r is not native]}
+        return True
+    return False
+
+
+def lift_native_ranges(config_dir):
+    """lift_native_range over the socket and vSocket site exports; returns 'file: site' for each site changed."""
+    lifted = []
+    for name in SITE_FILES:
+        path = os.path.join(config_dir, name)
+        if not os.path.exists(path):
+            continue
+        with open(path) as fh:
+            doc = json.load(fh)
+        sites = doc.get("sites") if isinstance(doc, dict) else None
+        changed = [s.get("name") for s in sites or [] if isinstance(s, dict) and lift_native_range(s)]
+        if changed:
+            with open(path, "w") as fh:
+                json.dump(doc, fh, indent=2)
+            lifted += [f"{name}: {n}" for n in changed]
+    return lifted
+
+
+def _log_lifted(lifted):
+    if lifted:
+        log(f"Restated the native range of {len(lifted)} site(s) with its details on the site, where the site "
+            "modules read them (the export had left them on the LAN interface): "
+            + ", ".join(x.split(": ", 1)[1] for x in lifted) + ".")
+
+
 def _account(profile):
     """The account number the profile points at, for the opening line (None if it can't be read)."""
     try:
@@ -128,12 +190,22 @@ def _account(profile):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("--profile", required=True, help="catocli profile of the current (source) account")
+    ap.add_argument("--profile", help="catocli profile of the current (source) account")
     ap.add_argument("--config-dir", default="config_data", help="where the export goes (default: config_data)")
     ap.add_argument("--no-webhooks", action="store_true", help="skip scripts/export_webhooks.py")
     ap.add_argument("--heartbeat", type=float, default=15, metavar="SECONDS",
                     help="after this many quiet seconds, print a line saying it's still working (default: 15)")
+    ap.add_argument("--normalize-only", action="store_true",
+                    help="only restate native ranges in an existing export (no API calls), then stop")
     args = ap.parse_args()
+    if args.normalize_only:
+        lifted = lift_native_ranges(args.config_dir)
+        _log_lifted(lifted)
+        if not lifted:
+            log("Every site's native range is already in the usual shape; nothing changed.")
+        return 0
+    if not args.profile:
+        ap.error("--profile is required (unless --normalize-only)")
 
     catocli = shutil.which("catocli")
     if not catocli:
@@ -216,13 +288,19 @@ def main():
             (l for l in lines if "rror" in l or "denied" in l.lower()), f"exit code {code}"))
         log("Step 3 done." if code == 0 else "Step 3 failed; the summary below has the error.")
 
+    lifted = lift_native_ranges(args.config_dir)
+    if lifted:
+        log()
+        _log_lifted(lifted)
+
     refused = [{"type": t, "error": e} for t, (ok, e) in results.items() if not ok and DENIED.search(e)]
     failed = [{"type": t, "error": e} for t, (ok, e) in results.items() if not ok and not DENIED.search(e)]
     exported = sorted(t for t, (ok, _) in results.items() if ok)
     os.makedirs(args.config_dir, exist_ok=True)
     with open(os.path.join(args.config_dir, "export_report.json"), "w") as fh:
         json.dump({"written_by": "export_source.py", "when": datetime.datetime.now().isoformat(timespec="seconds"),
-                   "profile": args.profile, "exported": exported, "refused": refused, "failed": failed}, fh, indent=1)
+                   "profile": args.profile, "exported": exported, "refused": refused, "failed": failed,
+                   "native_range_lifted": lifted}, fh, indent=1)
 
     log()
     log(f"Finished: {len(exported)} exported, {len(refused)} refused for lack of permission, {len(failed)} failed. "

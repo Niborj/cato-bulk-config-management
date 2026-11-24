@@ -220,6 +220,15 @@ into `config_data/export_report.json`, and the check reports it as
 `export_refused` (with the permission each type needs) or `export_failed`.
 Refusals the check also sees by reading the policy live are listed once.
 
+Some exports leave a site's native range details (local IP, DHCP and the
+rest) on its LAN interface, with only the subnet on the site itself; this was
+seen on sites with no WAN interfaces. The site modules read the local IP from
+the site, so those sites failed to plan. `export_source.py` restates them in
+the usual shape after every export: the details on the site's `native_range`,
+and that interface as the default LAN. Nothing is added or dropped.
+`--normalize-only` does the same to an export you already have, with no API
+calls.
+
 It shows its progress as it goes, so a long export never looks stalled. Its
 own lines are stamped with the time since it started (`[export_source 1:05]`)
 and say which of the three steps is running. catocli's line for each type
