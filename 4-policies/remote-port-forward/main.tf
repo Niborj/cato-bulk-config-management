@@ -17,7 +17,6 @@ module "rpf_rules" {
   rpf_rules_json_file_path = var.rpf_rules_json_file_path
 
   # Carry the source policy's on/off state across (null = leave unmanaged).
-
   policy_enabled     = try(one(values(jsondecode(file(var.rpf_rules_json_file_path)).data.policy)).policy.enabled, null)
   allow_empty_policy = true
   # Dynamic allocated-IP resolution by (description, popLocation) -- see
