@@ -264,6 +264,7 @@ def ready_text(f):
         "feat_swp_ok": "Site Web Proxy rules can be created in the new account.",
         "feat_srt_ok": "Your network ranges don't need Static Range Translation.",
         "feat_waf_range_done": "The IP ranges that had to be created by hand are in place.",
+        "feat_l7_confirmed": f"LAN Layer 7 enforcement is on for {', '.join(c.get('sites') or [])}, as confirmed by your team.",
         "int_classic_done": f"{c.get('n')} legacy groups have already been recreated for the migration.",
         "int_ok": "Every site, range, application and IP address your rules name is in the export.",
     }.get(k, f["title"])

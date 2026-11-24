@@ -810,7 +810,7 @@ def _deps_state_has_ranges(folder=None):
         return False
 
 
-def check_features(rep, exp, refs, probes, tgt=None, deps_deployed=None):
+def check_features(rep, exp, refs, probes, tgt=None, deps_deployed=None, lan_l7_confirmed=False):
     cat = "features"
     rbi_rules = [f'{r["family"]}: {r["name"]}' for r in exp["rules"] if r["raw"].get("action") == "RBI"]
     if rbi_rules:
@@ -872,7 +872,12 @@ def check_features(rep, exp, refs, probes, tgt=None, deps_deployed=None):
             sites = sorted({x["name"] for x in scope.get("site") or []} | {f'group {x["name"]}' for x in scope.get("group") or []})
             l7.append(f'{r["name"]} (sites: {", ".join(sites) or "every site the network rule covers"})')
             l7_rules.append(f'{r["family"]}: {r["name"]}')
-    if l7:
+    if l7 and lan_l7_confirmed:
+        sites = sorted({x.rsplit("(sites: ", 1)[-1].rstrip(")") for x in l7})
+        rep.add(cat, "OK", "feat_l7_confirmed", {"n": len(l7), "sites": sites},
+                f"LAN Layer 7 enforcement confirmed on for {', '.join(sites)} (--lan-l7-confirmed; the API cannot read it)",
+                items=l7)
+    elif l7:
         rep.skip(l7_rules)
         rep.add(cat, "ACTION", "feat_l7", {"n": len(l7), "sites": sorted({x.rsplit("(sites: ", 1)[-1].rstrip(")") for x in l7})}, f"{len(l7)} LAN firewall rule(s) match on applications or services (Layer 7)",
                 items=l7, rules=l7_rules,
@@ -1158,6 +1163,9 @@ def main():
                     help="customer name for the cover of the branded report (default: the target account name)")
     ap.add_argument("--pdf", action="store_true",
                     help="also print the branded report to preflight_report.pdf (needs a local Chrome, Chromium or Edge)")
+    ap.add_argument("--lan-l7-confirmed", action="store_true",
+                    help="LAN Layer 7 enforcement is switched on in the target for every site the check names "
+                         "(the API cannot read it): stop leaving the LAN firewall rules that need it out")
     ap.add_argument("--strict", action="store_true", help="exit 1 when ACTION items remain (CI use)")
     ap.add_argument("--quiet", action="store_true", help="print only the summary")
     args = ap.parse_args()
@@ -1192,7 +1200,7 @@ def main():
     check_pops(rep, exp, src, tgt, refs)
     check_identity(rep, exp, src, tgt, refs, tgt_api)
     check_cma_only(rep, refs, probes)
-    check_features(rep, exp, refs, probes, tgt)
+    check_features(rep, exp, refs, probes, tgt, lan_l7_confirmed=args.lan_l7_confirmed)
     check_integrity(rep, exp, src, refs)
     check_target_state(rep, exp, tgt)
     if probes and probes.get("error"):

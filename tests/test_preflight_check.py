@@ -194,6 +194,18 @@ class LeaveOut(unittest.TestCase):
             self.assertEqual("AzureVDI-2" in rep.exclude["global_ip_ranges_exclude"], excluded, (exists, deployed))
             self.assertEqual(("globalIpRange", "AzureVDI-2") in rep.leave_out, left_out, (exists, deployed))
 
+    def test_lan_l7_confirmed_keeps_the_rules_in(self):
+        nr = {"name": "NR", "site": {"site": [{"name": "Branch-1"}], "group": []}}
+        fw = {"family": "socketLan", "name": "NR :: FW", "raw": {"name": "FW", "application": {"customApp": [{"name": "A"}]}},
+              "lan_firewall": True, "network_rule": nr}
+        rep = pc.Report()
+        pc.check_features(rep, export(rules=[fw]), {}, None, deps_deployed=False, lan_l7_confirmed=True)
+        self.assertEqual(rep.skip_rules, set())
+        f = [x for x in rep.findings if x["key"] == "feat_l7_confirmed"][0]
+        self.assertEqual(f["severity"], "OK")
+        import preflight_report as pr
+        self.assertIn("Branch-1", pr.ready_text(f))
+
     def test_nothing_missing_still_writes_a_plain_copy_command(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:

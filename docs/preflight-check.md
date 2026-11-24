@@ -184,6 +184,11 @@ keeps such a range excluded until it exists in the target **and**
 file and reports it as OK. A range made by hand before the first deploy stays
 excluded for that deploy, with an ACTION to rerun the check straight after.
 
+LAN Layer 7 enforcement is a per-site switch the API cannot read, so the check
+always leaves out the LAN firewall rules that need it, until you tell it
+otherwise. Once the switch is on for the sites it names (the sites must exist
+first), run it with `--lan-l7-confirmed` and those rules stay in.
+
 Wi-Fi passwords are never written to these files on purpose. `1-sites`
 accepts any value you give it, so a placeholder would go live as the real
 password. Put the real ones in `wifi_ssid_passkeys` yourself.
