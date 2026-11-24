@@ -83,8 +83,22 @@ What it holds:
   migration team), each with why it matters, what to do and the names involved,
   with a box to tick.
 - **Already in place** and **What this check can't confirm for you**.
+- **Part 2, Running the migration**: the whole Terraform run as numbered steps,
+  each command written out for this pair of accounts (profile names, account
+  numbers, folders, the policies to clear, the Wi-Fi networks to fill in), with a
+  Copy button on every command. Set up once per machine, prepare (export, rerun
+  the check, legacy groups, copying identities to a test account, clearing sample
+  rules, leaving out what isn't ready, secrets), run (foundations, then
+  policies), check the result (re-plan, export the target, `order_check.py` and
+  `fidelity_check.py`), and finish up (hand-made IP ranges, LAN Layer 7,
+  bringing left-out rules back, IPSec tunnels, hardware, what to do when a step
+  fails). Steps only appear when the findings call for them, and each deploy
+  step says which action plan items belong before it. `--mirror` is added to
+  every Terraform command when the pinned provider version is found in
+  `~/.terraform.d/mirror`. The same steps are in `preflight_report.md`.
 - Appendix A: each affected policy rule once, with the numbered items it waits on.
-- Appendix B: the technical notes and commands for the migration engineers.
+  The cover, the action plan summary and this appendix all count the same rules.
+- Appendix B: the technical notes for the migration engineers.
 
 The wording follows the Cato brand voice: plain US English, sentence-case
 headings, calm labels ("Required before migration" rather than "BLOCKER"), and
@@ -104,13 +118,28 @@ To change what the report says about a finding, edit `guide()` in
 |---|---|---|
 | Access | Both tenants reachable, not the same account, plan type. Trial accounts report no licence data, so capacity checks turn into a list of what to ask for. | `accountManagement` |
 | Export | Every file the bulk folders read is present; static hosts were exported for every site type, not just sockets. | export folder + host count |
-| Licensing | Public (allocated) IPs needed vs available, ZTNA users, site or pooled bandwidth licences, add-on SKUs the source has and the target lacks. | `licensing` incl. `globalLicenseAllocations` |
+| Licensing | Public (allocated) IPs needed vs available, ZTNA users, add-on SKUs the source has and the target lacks. Sites: which exported sites hold a site licence or a share of pooled bandwidth in the source, against the target's free site licences and free pooled bandwidth (sites with no licence in the source need none). The API reports no bandwidth on site licences, so those compare by count. | `licensing` incl. `globalLicenseAllocations`, `SiteLicense.site`, `PooledBandwidthLicense.sites` |
 | PoPs | Every PoP the source allocates IPs on, pins in WAN Network rules or uses for IPSec tunnels is available to the target, plus the rules and sites that depend on each missing one. | `entityLookup(type: location)` |
 | Identity | Every user group and user the rules name: present in the target or not, grouped by how it gets there (SCIM, LDAP, manual, dynamic). Whether the target has any SCIM-provisioned users at all. With `scim_url` and `scim_token` in the target profile, a read-only call to the SCIM endpoint. | `user.userList`, `user.usersGroupList`, SCIM `GET /Users`, `/Groups` |
-| CMA-only objects | Custom categories, device posture profiles, bandwidth priorities beyond the defaults, user notification templates, DLP content and EDM profiles, RBI profiles. The API can reference these but cannot create or list them. | `--probe` |
-| Features | RBI and Site Web Proxy (verified with `--probe`), real Static Range Translation, LAN firewall rules that need Layer 7 on a site, the 169.254.169.254 range, Wi-Fi passwords, webhook endpoints, IPSec pre-shared keys. | export + `--probe` |
-| Integrity | Rules that point at classic groups (invisible to the groups API) and are not yet in `groups.json`, or at sites, ranges, apps or IPs that no longer exist in the source. | export + `groups.groupList` |
+| CMA-only objects | Custom categories, device posture profiles (including `devicePostureProfile` in Always-On, TLS Inspection and Dynamic IP Allocation), bandwidth priorities beyond the defaults, user notification templates, DLP content and EDM profiles, RBI profiles. The API can reference these but cannot create or list them. | `--probe` |
+| Features | RBI and Site Web Proxy (verified with `--probe`), real Static Range Translation, LAN firewall rules that need Layer 7 on a site, the 169.254.169.254 range (also via `allowedHostIP` and `excludeTraffic` in Terminal Server), rules that match the Sanctioned Apps category (its contents are an account setting nobody copies), Wi-Fi passwords, webhook endpoints, IPSec pre-shared keys. | export + `--probe` |
+| Integrity | Rules that point at classic groups (invisible to the groups API) and are not yet in `groups.json`, or at sites, ranges, apps or IPs that no longer exist in the source. Rules that name network interfaces, floating subnets or value sets, which the check cannot look up and the migration does not create (a WARN to check by hand). | export + `groups.groupList` |
 | Target | Existing rules whose names clash with source rules (factory rules, or a previous run), existing sites, groups and allocated IPs, policy on/off differences. | `policy.<family>`, `entityLookup` |
+
+### Coverage beyond the reference tenant
+
+The checks were built against one reference tenant, so they were then held up
+against the API itself: every `*RefInput` field in the 20 policy `addRule`
+inputs of the live schema (2026-11-24). Each kind of object a rule can name is
+now either checked above, built in to every account (catalog applications and
+categories, countries, services, system groups, App Control activities and
+content types, the Sanctioned Apps category itself), created by the migration
+from the export (FQDN and IP range containers, mailing lists, subscription
+groups, webhooks, private apps), or flagged for a person to check
+(`int_unchecked`). Two fields name a known object under another key
+(`devicePostureProfile`, and `allowedHostIP`/`excludeTraffic` for global IP
+ranges); the check and `scope_policies_to_target.py` share an alias table for
+them. When the API grows new rule fields, rerun that comparison.
 
 ### What the probes do
 

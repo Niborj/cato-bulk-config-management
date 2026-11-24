@@ -215,6 +215,48 @@ class LeaveOut(unittest.TestCase):
             self.assertFalse(cmd[0].endswith("\\"))
 
 
+class GenericAccounts(unittest.TestCase):
+    """Things Reference Arch never used but other accounts will."""
+
+    def test_aliased_references_count_as_their_object(self):
+        import scope_policies_to_target as sp
+        rules = [rule("ztnaAlwaysOn", "AO", devicePostureProfile=[{"name": "Laptop"}]),
+                 rule("terminalServer", "TS", allowedHostIP=[{"name": "Jump"}], excludeTraffic=[{"name": "Meta"}])]
+        refs = pc.collect_refs(rules)
+        self.assertEqual(refs["device"], {"Laptop": ["ztnaAlwaysOn: AO"]})
+        self.assertEqual(set(refs["globalIpRange"]), {"Jump", "Meta"})
+        self.assertEqual(sp.blockers(rules[0]["raw"], {"device": {"Laptop"}}, False), ["device:Laptop"])
+        self.assertEqual(sp.blockers(rules[1]["raw"], {"globalIpRange": {"Meta"}}, False), ["globalIpRange:Meta"])
+
+    def test_site_licenses_counted_against_licensed_sites(self):
+        sites = {n: {"name": n, "_kind": "socket"} for n in ("A", "B", "C")}
+        src = tenant(licenses=[{"sku": "CATO_SITE", "status": "ACTIVE", "site": {"name": "A"}},
+                               {"sku": "CATO_SITE", "status": "ACTIVE", "site": {"name": "B"}},
+                               {"sku": "CATO_PB", "status": "ACTIVE", "total": 500, "allocatedBandwidth": 0,
+                                "sites": [{"site": {"name": "C"}, "allocatedBandwidth": 100}]}])
+        short = tenant(licenses=[{"sku": "CATO_SITE", "status": "ACTIVE", "site": None}])
+        enough = tenant(licenses=[{"sku": "CATO_SITE", "status": "ACTIVE", "site": None}] * 2
+                        + [{"sku": "CATO_PB", "status": "ACTIVE", "total": 200, "allocatedBandwidth": 50, "sites": []}])
+        for tgt, key in ((short, "lic_sites_short"), (enough, "lic_sites_ok"), (tenant(), "lic_sites_unknown")):
+            rep = pc.Report()
+            pc.check_licensing(rep, export(sites=sites), src, tgt)
+            f = [x for x in rep.findings if x["key"].startswith("lic_sites")][0]
+            self.assertEqual(f["key"], key)
+            self.assertEqual((f["ctx"]["ded"], f["ctx"]["pool"], f["ctx"]["pool_bw"]), (2, 1, 100))
+
+    def test_sanctioned_apps_and_unchecked_objects(self):
+        rules = [rule("internetFirewall", "Allow sanctioned", destination={"sanctionedAppsCategory": [{"name": "Sanctioned Apps"}]}),
+                 rule("applicationControl", "Float", source={"floatingSubnet": [{"name": "Roaming"}]})]
+        refs = pc.collect_refs(rules)
+        rep = pc.Report()
+        pc.check_features(rep, export(rules=rules), refs, None, deps_deployed=False)
+        pc.check_integrity(rep, export(rules=rules), tenant(), refs)
+        keys = {f["key"]: f for f in rep.findings}
+        self.assertEqual(keys["feat_sanctioned"]["rules"], ["internetFirewall: Allow sanctioned"])
+        self.assertEqual(keys["int_unchecked"]["severity"], "WARN")
+        self.assertIn("floating subnet 'Roaming'", keys["int_unchecked"]["items"][0])
+
+
 class ScimEndpoint(unittest.TestCase):
     """The SCIM check against a local stand-in for the Cato SCIM app."""
 
@@ -316,6 +358,90 @@ class CustomerReport(unittest.TestCase):
                        ">1</span>Make 1 PoP location available"):
             self.assertTrue(needle in out, f"missing from report: {needle}")
         self.assertTrue("50%" in out, "readiness gauge should read 50%")  # 1 of 2 rules ready
+
+    RUN = {"source_profile": "src-ro", "target_profile": "new acct", "source_account": "111", "target_account": "222",
+           "config_dir": "config_data", "target_config_dir": "config_data_target", "out_dir": "preflight", "probe": True,
+           "customer": None, "lan_l7_confirmed": False, "provider_version": "2.0.0", "mirror": False}
+
+    def _meta(self, **run):
+        return {"source": "Src (111)", "target": "Tgt (222)", "target_name": "Tgt", "when": "2026-11-24", "probe": True,
+                "run": dict(self.RUN, **run)}
+
+    def test_cover_and_appendix_count_the_same_rules(self):
+        rep = pc.Report()
+        rep.add("pops", "BLOCKER", "pop_missing", {"n": 1, "names": ["P"]}, "x", items=["P"], rules=["wanNetwork: A"])
+        rep.add("integrity", "WARN", "int_stale", {"n": 1}, "y", items=["site 'Old'"], rules=["wanNetwork: B"])
+        exp = export(rules=[rule("wanNetwork", n) for n in "ABCD"])
+        out = self.pr.render_customer_html(rep, exp, self._meta())
+        self.assertIn("2 of your 4 policy rules can move", out)
+        self.assertIn("2 of your 4 policy rules wait on at least one item", out)
+        self.assertIn("50%", out)
+
+    def test_singular_wording(self):
+        f = {"rules": ["wanNetwork: A"], "title": "", "detail": "", "items": []}
+        g = self.pr.guide(dict(f, key="id_missing", ctx={"type": "LDAP", "n": 1, "groups": 1, "users": 0}))
+        self.assertEqual(g["title"], "Sync 1 user group from your directory")
+        self.assertIn("1 of your policy rules depends on this", g["why"])
+        g = self.pr.guide(dict(f, key="id_missing", ctx={"type": "DYNAMIC", "n": 1, "groups": 1, "users": 0}))
+        self.assertEqual(g["title"], "Turn on 1 dynamic user group")
+        g = self.pr.guide(dict(f, key="id_missing", ctx={"type": "NOT IN SOURCE", "n": 1, "groups": 0, "users": 1}))
+        self.assertEqual(g["title"], "Review 1 user that no longer exists")
+        g = self.pr.guide(dict(f, key="lic_skus_missing", ctx={"n": 1}))
+        self.assertTrue(g["why"].startswith("This service is"))
+        g = self.pr.guide(dict(f, key="pop_missing", ctx={"n": 1, "names": ["P"]}))
+        self.assertIn("leave its items out", g["title"])
+
+    def test_undecided_object_hides_the_api_error(self):
+        f = {"key": "cma_undecided", "rules": [], "title": "", "detail": "",
+             "ctx": {"kind": "edmProfile", "n": 1, "one": "DLP EDM profile", "many": "DLP EDM profiles", "names": ["EDM A"]},
+             "items": ["EDM A: Internal error while validating the rule"]}
+        g = self.pr.guide(f)
+        self.assertEqual(g["title"], "Check 1 DLP EDM profile in the CMA")
+        self.assertEqual(g["items"], ["EDM A"])
+        self.assertIn("check that each item", g["steps"][0])
+
+    def test_cant_confirm_box_lists_only_what_applies(self):
+        rep = pc.Report()
+        out = self.pr.render_customer_html(rep, export(rules=[rule("wanNetwork", "A")]), self._meta())
+        self.assertNotIn("trial", out.split("What this check can't confirm")[1].split("</div>")[0])
+        rep.add("access", "WARN", "access_trial", {}, "t")
+        out = self.pr.render_customer_html(rep, export(rules=[rule("wanNetwork", "A")]), self._meta())
+        self.assertIn("because the new account is a trial", out)
+
+    def test_scim_items_are_not_repeated(self):
+        rep = pc.Report()
+        rep.add("identity", "BLOCKER", "id_missing", {"type": "SCIM", "n": 1, "groups": 1, "users": 0}, "x",
+                items=["user group 'G'"], rules=["internetFirewall: A"])
+        rep.add("identity", "ACTION", "id_scim_inactive", {}, "y")
+        shown = [f["key"] for f in self.pr._shown(rep)]
+        self.assertEqual(shown, ["id_missing"])
+
+    def test_runbook_commands_name_this_pair_of_accounts(self):
+        rep = pc.Report()
+        rep.add("target", "ACTION", "tgt_clash", {"n": 2, "families": ["internetFirewall", "socketLan"]}, "c",
+                items=["internetFirewall: 1 (X)", "socketLan: 1 (Y)"])
+        rep.add("features", "ACTION", "feat_wifi", {"n": 1}, "w", items=["HQ:Corp"])
+        rep.add("features", "ACTION", "feat_l7", {"n": 1, "sites": ["HQ"]}, "l", items=["NR / FW (sites: HQ)"])
+        exp = export(rules=[rule("wanNetwork", "A")])
+        phases = self.pr.build_runbook(rep, self._meta())
+        cmds = [c for _, steps in phases for s in steps for c in s["cmds"]]
+        files = [s["file"] for _, steps in phases for s in steps if s.get("file")]
+        self.assertIn("catocli configure set --profile src-ro --cato-token 'SOURCE_API_KEY' --account-id 111", cmds)
+        self.assertIn("python3 scripts/purge_all.py --profile 'new acct' --only internet_firewall,lan_firewall --execute", cmds)
+        self.assertIn("sh preflight/scope_command.sh", cmds)
+        self.assertTrue(any(c.startswith("python3 scripts/bulk_apply.py --profile 'new acct' --mode deploy --config-dir "
+                                         "config_data_target --folders 0-dependencies") for c in cmds))
+        self.assertTrue(any("--lan-l7-confirmed" in c for c in cmds))
+        self.assertFalse(any("--mirror" in c for c in cmds))
+        self.assertEqual(files, ['wifi_ssid_passkeys = {\n  "HQ:Corp" = ""\n}'])
+        mirrored = self.pr.build_runbook(rep, self._meta(mirror=True))
+        self.assertTrue(all("--mirror" in c for _, st in mirrored for s in st for c in s["cmds"] if "bulk_apply" in c))
+        out = self.pr.render_customer_html(rep, exp, self._meta())
+        self.assertIn("Running the migration", out)
+        self.assertIn('<div class="before">Before this step: item', out)
+        md = "\n".join(self.pr.render_runbook_md(phases, {"feat_wifi": "Provide passwords"}))
+        self.assertIn("```bash\nsh preflight/scope_command.sh\n```", md)
+        self.assertEqual(self.pr.build_runbook(rep, {"source": "", "target": ""}), [])  # no run details, no runbook
 
     def test_modified_logo_is_left_out(self):
         import tempfile

@@ -61,7 +61,8 @@ from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from cato_profile import REPO_ROOT, get_profile, load_protected  # noqa: E402
-from preflight_report import html_to_pdf, render_customer_html  # noqa: E402
+from preflight_report import (_shown, build_runbook, guide, html_to_pdf, render_customer_html,  # noqa: E402
+                              render_runbook_md)
 
 DEFAULT_ENDPOINT = "https://api.catonetworks.com/api/v1/graphql2"
 SEVERITIES = ["BLOCKER", "ACTION", "WARN", "INFO", "OK"]
@@ -83,7 +84,18 @@ CMA_ONLY_KINDS = {  # kind: (singular, plural)
 }
 INTEGRITY_KINDS = {"group", "site", "backhaulingSite", "associatedSite", "siteNetworkSubnet",
                    "customApp", "globalIpRange", "host", "allocationIp", "externalIp", "popLocation"}
-REF_KINDS = IDENTITY_KINDS | set(CMA_ONLY_KINDS) | INTEGRITY_KINDS
+# The same object under another key in some policies (from the API schema's *RefInput fields):
+# device posture in Always-On, TLS Inspection and Dynamic IP Allocation; global ranges in Terminal Server.
+REF_ALIASES = {"devicePostureProfile": "device", "allowedHostIP": "globalIpRange", "excludeTraffic": "globalIpRange"}
+# Referenced objects the migration neither creates nor can look up: flagged so someone checks them by hand.
+UNCHECKED_KINDS = {"networkInterface": "network interface", "floatingSubnet": "floating subnet",
+                   "valueSet": "value set"}
+REF_KINDS = IDENTITY_KINDS | set(CMA_ONLY_KINDS) | INTEGRITY_KINDS | set(UNCHECKED_KINDS) | {"sanctionedAppsCategory"}
+
+
+def _pl(n, one, many=None):
+    """'1 rule' / '2 rules' (many defaults to one + 's')."""
+    return f"{n} {one if n == 1 else (many or one + 's')}"
 
 # GraphQL policy family names, in the order bulk_apply deploys them.
 POLICY_FAMILIES = [
@@ -167,7 +179,8 @@ class Api:
 Q_ACCOUNT = """query q($a:ID!){
   accountManagement(accountId:$a){ account{ id name type tenancy plan status } }
   licensing(accountId:$a){ licensingInfo{
-    licenses{ sku status plan ... on SiteLicense { total } ... on PooledBandwidthLicense { total }
+    licenses{ sku status plan ... on SiteLicense { total site{ name } }
+              ... on PooledBandwidthLicense { total allocatedBandwidth sites{ site{ name } allocatedBandwidth } }
               ... on ZtnaUsersLicense { total } ... on PublicIpsLicense { total } }
     globalLicenseAllocations{ publicIps{ total allocated available } ztnaUsers{ total allocated available } } } }
   popLocations(accountId:$a){ allocatedIpList(input:{}){ allocatedIp{ ip description popLocation{ id name } } } }
@@ -293,10 +306,11 @@ def collect_refs(rules):
     def walk(o, label):
         if isinstance(o, dict):
             for k, v in o.items():
-                if k in REF_KINDS:
+                kind = REF_ALIASES.get(k, k)
+                if kind in REF_KINDS:
                     for x in (v if isinstance(v, list) else [v]):
                         if isinstance(x, dict) and x.get("name"):
-                            refs[k][x["name"]].add(label)
+                            refs[kind][x["name"]].add(label)
                 walk(v, label)
         elif isinstance(o, list):
             for x in o:
@@ -576,6 +590,21 @@ def check_export(rep, exp, src):
         rep.add(cat, "WARN", "export_no_rules", {}, "No policy rules found in the export")
 
 
+def _site_license_use(licenses):
+    """({site name or None: count of site licenses}, {site name: pooled Mbps}); None = unassigned."""
+    ded, pool = defaultdict(int), {}
+    for l in licenses:
+        if l.get("status") not in (None, "ACTIVE"):
+            continue
+        if "site" in l and "allocatedBandwidth" not in l:
+            ded[(l.get("site") or {}).get("name")] += 1
+        for s in l.get("sites") or []:
+            name = (s.get("site") or {}).get("name")
+            if name:
+                pool[name] = pool.get(name, 0) + (s.get("allocatedBandwidth") or 0)
+    return dict(ded), pool
+
+
 def check_licensing(rep, exp, src, tgt):
     cat = "licensing"
     need_ips = len(src["allocated_ips"]) or len(exp["allocated_ips"])
@@ -586,8 +615,8 @@ def check_licensing(rep, exp, src, tgt):
             rep.add(cat, "ACTION", "lic_ips_unknown", {"need": need_ips}, f"Allocated (public) IPs: the source uses {need_ips}; the target reports no "
                                    f"public-IP license data ({already} already allocated there)",
                     fix=f"Make sure the target may allocate at least {need_ips} IPs before you deploy "
-                        "0-dependencies. A fresh trial allowed only 3 in our test, and every allocation past the cap "
-                        "fails with 'You cannot allocate more IPs than allowed by your license'.")
+                        "0-dependencies. New and trial accounts often allow only a few, and every allocation past the "
+                        "cap fails with 'You cannot allocate more IPs than allowed by your license'.")
         elif (t_pub.get("available") or 0) + already < need_ips:
             rep.add(cat, "BLOCKER", "lic_ips_short", {"need": need_ips, "total": t_pub.get("total")}, f"Allocated (public) IPs: the source uses {need_ips}, the target has "
                                     f"{t_pub.get('total')} licensed ({t_pub.get('available')} free)",
@@ -606,17 +635,38 @@ def check_licensing(rep, exp, src, tgt):
                     fix="Raise the target's ZTNA user license.")
         else:
             rep.add(cat, "OK", "lic_ztna_ok", {"need": s_z["allocated"]}, f"ZTNA users: need {s_z['allocated']}, target licensed for {t_z.get('total')}")
+    # Sites: a site holds either its own site license or a share of pooled bandwidth. The export does not say
+    # which, so read it from the source's licenses; a site with neither in the source needs none in the target.
     n_sites = len(exp["sites"])
-    t_site_lic = [l for l in tgt["licenses"] if l.get("sku") in ("CATO_SITE", "CATO_SSE_SITE", "CATO_PB", "CATO_PB_SSE")]
-    if n_sites:
+    s_ded, s_pool = _site_license_use(src["licenses"])
+    t_ded, t_pool = _site_license_use(tgt["licenses"])
+    need_ded = sorted(n for n in exp["sites"] if n in s_ded)
+    need_pool = {n: bw for n, bw in s_pool.items() if n in exp["sites"]}
+    unlicensed = n_sites - len(need_ded) - len(need_pool)
+    free_ded = t_ded.get(None, 0)
+    free_pool = sum(max(0, (l.get("total") or 0) - (l.get("allocatedBandwidth") or 0))
+                    for l in tgt["licenses"] if "allocatedBandwidth" in l)
+    need_pool_bw = sum(need_pool.values())
+    ctx = {"need": len(need_ded) + len(need_pool), "sites": n_sites, "ded": len(need_ded), "pool": len(need_pool),
+           "pool_bw": need_pool_bw, "free_ded": free_ded, "free_pool": free_pool, "unlicensed": unlicensed}
+    note = (" and ".join(x for x in (f"{_pl(len(need_ded), 'site')} with a site license" if need_ded else "",
+                                     f"{_pl(len(need_pool), 'site')} on pooled bandwidth ({need_pool_bw} Mbps)" if need_pool else "")
+                         if x) + " in the source" + (f"; {unlicensed} more have no license there either" if unlicensed else ""))
+    if n_sites and ctx["need"]:
         if not tgt["licenses"]:
-            rep.add(cat, "ACTION", "lic_sites_unknown", {"need": n_sites}, f"Sites: the export holds {n_sites} sites; the target reports no site or pooled "
-                                   "bandwidth licenses", fix=f"Make sure the target can hold {n_sites} sites "
-                                                             "(site licenses or a pooled bandwidth license).")
-        elif not t_site_lic:
-            rep.add(cat, "BLOCKER", "lic_sites_none", {"need": n_sites}, f"Sites: {n_sites} to create, but the target has no site or pooled bandwidth license")
+            rep.add(cat, "ACTION", "lic_sites_unknown", ctx, f"Sites: the target reports no site or pooled bandwidth licenses ({note})",
+                    fix=f"Make sure the target has {_pl(len(need_ded), 'free site license')}"
+                        + (f" and {need_pool_bw} Mbps of free pooled bandwidth" if need_pool else "") + ".")
+        elif free_ded < len(need_ded) or free_pool < need_pool_bw:
+            rep.add(cat, "BLOCKER", "lic_sites_short", ctx, f"Sites: the target has {_pl(free_ded, 'free site license')} and "
+                                   f"{free_pool} Mbps of free pooled bandwidth ({note})",
+                    fix="Add site licenses or pooled bandwidth to the target, or leave some sites out "
+                        "(sites the target cannot license fail to create).")
         else:
-            rep.add(cat, "INFO", "lic_sites_info", {"need": n_sites}, f"Sites: {n_sites} to create; target has {len(t_site_lic)} site/pooled license record(s)")
+            rep.add(cat, "OK", "lic_sites_ok", ctx, f"Sites: the target has {_pl(free_ded, 'free site license')} and "
+                               f"{free_pool} Mbps of free pooled bandwidth ({note})")
+    elif n_sites:
+        rep.add(cat, "INFO", "lic_sites_info", ctx, f"Sites: none of the {n_sites} sites hold a license in the source")
     s_skus = {l["sku"] for l in src["licenses"] if l.get("status") in (None, "ACTIVE")}
     t_skus = {l["sku"] for l in tgt["licenses"] if l.get("status") in (None, "ACTIVE")}
     missing = sorted(s_skus - t_skus)
@@ -730,7 +780,9 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
     }
     for itype in sorted(by_type):
         rep.add(cat, "BLOCKER", "id_missing", {"type": itype, "n": len(by_type[itype]),
-                                               "groups": kinds[itype]["groups"], "users": kinds[itype]["users"]}, f"{len(by_type[itype])} {itype} identities the rules name are missing in the target",
+                                               "groups": kinds[itype]["groups"], "users": kinds[itype]["users"]},
+                f"{_pl(len(by_type[itype]), itype + ' identity', itype + ' identities')} the rules name "
+                f"{'is' if len(by_type[itype]) == 1 else 'are'} missing in the target",
                 items=by_type[itype], fix=fixes.get(itype, ""), rules=type_rules[itype])
     total_refs = len(refs.get("usersGroup", {})) + len(refs.get("user", {}))
     if total_refs and not by_type:
@@ -787,11 +839,12 @@ def check_cma_only(rep, refs, probes):
                         items=[f"{n}: {_uses(refs, kind, n)}" for n in missing], rules=_rules_for(refs, kind, missing),
                         fix="Create them in the target CMA with exactly the same names. The API cannot create or list them.")
             if unknown:
-                rep.add(cat, "WARN", "cma_undecided", {"kind": kind, "n": len(unknown), "one": one, "many": many}, f"{len(unknown)} {noun(len(unknown))} the probe could not decide",
+                rep.add(cat, "WARN", "cma_undecided", {"kind": kind, "n": len(unknown), "one": one, "many": many, "names": unknown},
+                        f"{len(unknown)} {noun(len(unknown))} the probe could not decide",
                         items=[f"{n}: {states[n][1][:160]}" for n in unknown], rules=_rules_for(refs, kind, unknown))
             present = len(names) - len(missing) - len(unknown)
             if present:
-                rep.add(cat, "OK", "cma_present", {"kind": kind, "n": present, "one": one, "many": many}, f"{present} {noun(present)} the rules use already exist in the target",
+                rep.add(cat, "OK", "cma_present", {"kind": kind, "n": present, "one": one, "many": many}, f"{present} {noun(present)} the rules use already {'exists' if present == 1 else 'exist'} in the target",
                         items=sorted(n for n, (st, _) in states.items() if st == "PRESENT"))
         else:
             rep.add(cat, "ACTION", "cma_unverified", {"kind": kind, "n": len(names), "one": one, "many": many}, f"{len(names)} {noun(len(names))} the rules use must exist in the target "
@@ -915,6 +968,14 @@ def check_features(rep, exp, refs, probes, tgt=None, deps_deployed=None, lan_l7_
                         "exclude-0-dependencies.auto.tfvars before 0-dependencies is deployed again: from then on it owns "
                         "every range in the account and would delete one it is told to leave out.")
 
+    sanctioned = _rules_for(refs, "sanctionedAppsCategory", set(refs.get("sanctionedAppsCategory", {})))
+    if sanctioned:
+        rep.add(cat, "ACTION", "feat_sanctioned", {"n": len(sanctioned)}, f"{_pl(len(sanctioned), 'rule')} match on the Sanctioned Apps "
+                                "category, whose contents are an account setting the migration does not copy",
+                items=sorted(sanctioned), rules=sanctioned,
+                fix="Mark the same applications as sanctioned in the target before the policies, or these rules deploy "
+                    "cleanly but match different traffic. The API cannot read or set the list.")
+
     wifi = []
     for s in exp["sites"].values():
         for w in s.get("wifi_ssids") or []:
@@ -978,6 +1039,14 @@ def check_integrity(rep, exp, src, refs):
                 stale[f"allocated IP '{n}'"].update(rules)
                 stale_refs.add((kind, n))
     rep.leave_out |= stale_refs
+    unchecked = {(k, n): r for k in UNCHECKED_KINDS for n, r in refs.get(k, {}).items()}
+    if unchecked:
+        rep.add(cat, "WARN", "int_unchecked", {"n": len(unchecked)}, f"{_pl(len(unchecked), 'object')} the rules name that this "
+                               "check cannot verify and the migration does not create",
+                items=[f"{UNCHECKED_KINDS[k]} '{n}': {_pl(len(r), 'rule')}, e.g. {r[0]}" for (k, n), r in sorted(unchecked.items())],
+                rules=set().union(*map(set, unchecked.values())),
+                fix="Check each exists in the target with exactly the same name before the policies (network interfaces "
+                    "come with their sites; floating subnets and value sets are made in the CMA).")
     if stale:
         rep.add(cat, "WARN", "int_stale", {"n": len(stale)}, f"{len(stale)} reference(s) point at objects that are not in the source export",
                 items=[f"{k}: {len(v)} rule(s), e.g. {sorted(v)[0]}" for k, v in sorted(stale.items())],
@@ -1005,7 +1074,8 @@ def check_target_state(rep, exp, tgt):
         if both:
             clashes.append(f"{fam}: {len(both)} ({', '.join(both[:3])}{', ...' if len(both) > 3 else ''})")
     if clashes:
-        rep.add(cat, "ACTION", "tgt_clash", {"n": sum(int(c.split(": ", 1)[1].split(" ")[0]) for c in clashes)}, "Rules already in the target share names with source rules "
+        rep.add(cat, "ACTION", "tgt_clash", {"n": sum(int(c.split(": ", 1)[1].split(" ")[0]) for c in clashes),
+                                             "families": [c.split(": ", 1)[0] for c in clashes]}, "Rules already in the target share names with source rules "
                                "(factory/sample rules, or a previous run)",
                 items=clashes, fix="New tenant: review, then clear them with `scripts/purge_all.py --profile <target> "
                                    "--only <families>` (dry run by default; --execute deletes). Re-run of an earlier "
@@ -1073,7 +1143,9 @@ def render_text(rep, exp, meta):
     lines.append("Summary: " + ", ".join(f"{c[s]} {s}" for s in SEVERITIES))
     total, nested = rule_totals(exp)
     lines.append(f"Rules that will fail until the BLOCKERs are fixed: {blocked_rule_count(rep)} of {total} "
-                 f"({nested} of them nested LAN firewall rules)")
+                 f"(the {total} are {total - nested} policy rules plus {nested} nested LAN firewall "
+                 f"{'rule' if nested == 1 else 'rules'})" if nested else
+                 f"Rules that will fail until the BLOCKERs are fixed: {blocked_rule_count(rep)} of {total}")
     lines.append(f"Rules that also depend on an ACTION item: {blocked_rule_count(rep, ('BLOCKER', 'ACTION'))} of {total}")
     return "\n".join(lines)
 
@@ -1104,10 +1176,41 @@ def render_markdown(rep, exp, meta):
             if f["fix"] and f["severity"] != "OK":
                 out.append(f"\n*What to do:* {f['fix']}")
             out.append("")
+    titles = {f["key"]: guide(f)["title"] for f in _shown(rep)}
+    out += render_runbook_md(build_runbook(rep, meta), titles)
     if meta.get("revisions"):
         out += ["## Probe revisions", "", "Created and discarded on the target during this run:", ""]
         out += [f"- {fam}: {rid}" for fam, rid in meta["revisions"]]
     return "\n".join(out) + "\n"
+
+
+def provider_mirror():
+    """(pinned provider version, True if a local build of it sits in ~/.terraform.d/mirror for bulk_apply --mirror)."""
+    try:
+        with open(os.path.join(REPO_ROOT, "0-dependencies", "versions.tf")) as fh:
+            m = re.search(r'version\s*=\s*"=?\s*([0-9][^"]*)"', fh.read())
+    except OSError:
+        m = None
+    ver = m.group(1).strip() if m else None
+    if not ver:
+        return None, False
+    pattern = os.path.expanduser(f"~/.terraform.d/mirror/registry.terraform.io/catonetworks/cato/{ver}/*/"
+                                 f"terraform-provider-cato_v{ver}*")
+    return ver, bool(glob.glob(pattern))
+
+
+def run_info(args, src_api, tgt_api):
+    """What the runbook in the reports needs to print exact commands for this pair of accounts."""
+    def rel(p):
+        p = os.path.abspath(p)
+        r = os.path.relpath(p, REPO_ROOT)
+        return r if not r.startswith(".." + os.sep + ".." + os.sep + "..") else p
+    ver, mirror = provider_mirror()
+    return {"source_profile": args.source_profile, "target_profile": args.target_profile,
+            "source_account": str(src_api.account), "target_account": str(tgt_api.account),
+            "config_dir": rel(args.config_dir), "target_config_dir": rel(os.path.abspath(args.config_dir).rstrip(os.sep) + "_target"),
+            "out_dir": rel(args.out_dir), "probe": bool(args.probe), "customer": args.customer,
+            "lan_l7_confirmed": bool(args.lan_l7_confirmed), "provider_version": ver, "mirror": mirror}
 
 
 def write_leave_out(rep, config_dir, out_dir):
@@ -1212,7 +1315,8 @@ def main():
     meta = {"source": f"{src['account'].get('name')} ({src_api.account})",
             "target_name": tgt["account"].get("name"),
             "target": f"{tgt['account'].get('name')} ({tgt_api.account})", "probe": args.probe,
-            "when": time.strftime("%Y-%m-%d %H:%M %Z"), "revisions": (probes or {}).get("revisions", [])}
+            "when": time.strftime("%Y-%m-%d %H:%M %Z"), "revisions": (probes or {}).get("revisions", []),
+            "run": run_info(args, src_api, tgt_api)}
     text = render_text(rep, exp, meta)
     if args.quiet:
         print("\n".join(text.splitlines()[-2:]))

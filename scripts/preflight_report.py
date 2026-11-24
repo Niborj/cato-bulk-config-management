@@ -57,17 +57,34 @@ CMA_WHY = {
     "rbiProfile": "Remote Browser Isolation (RBI) profiles control how isolated browsing behaves.",
 }
 SAME_NAMES = "In the CMA, create each item listed here with exactly the same name and settings as in your current account."
+CHECK_NAMES = ("In the CMA, check that each item listed here exists in the new account with exactly the same name, "
+               "and create any that don't, with the same settings as in your current account.")
 
 
-def _g(owner, title, why, steps=()):
-    return {"owner": owner, "title": title, "why": why, "steps": list(steps)}
+def _g(owner, title, why, steps=(), items=None):
+    g = {"owner": owner, "title": title, "why": why, "steps": list(steps)}
+    if items is not None:
+        g["items"] = list(items)  # customer view of the list, when the engineering one says too much
+    return g
+
+
+def _pl(n, one, many=None):
+    return f"{n} {one if n == 1 else (many or one + 's')}"
+
+
+def _who(c, n):
+    """'2 user groups', '1 user', '1 user group and 7 users' from an id_missing finding's counts."""
+    ng, nu = c.get("groups"), c.get("users")
+    if ng is None and nu is None:
+        return _pl(n, "user or group", "users and groups")
+    return " and ".join(x for x in (_pl(ng, "user group") if ng else "", _pl(nu, "user") if nu else "") if x)
 
 
 def guide(f):
     """Customer wording for a finding: owner, title, why it matters, what to do."""
     k, c, n = f["key"], f["ctx"], f["ctx"].get("n")
     rules = len(f["rules"])
-    affects = f" {rules} of your policy rules depend on this." if rules else ""
+    affects = (f" {rules} of your policy rules {'depends' if rules == 1 else 'depend'} on this." if rules else "")
     if k == "access_trial":
         return _g("cato_team", "Confirm license quantities for the new account",
                   "The new account is a trial, and trial accounts don't report license details. The quantities in this "
@@ -95,18 +112,26 @@ def guide(f):
                   f"{c['need']} people connect remotely with the Cato Client today. Zero Trust Network Access (ZTNA) "
                   f"user licenses let them connect to the new account.{extra}",
                   [f"Ask your Cato account team to license at least {c['need']} ZTNA users."])
-    if k in ("lic_sites_unknown", "lic_sites_none"):
-        return _g("cato_team", f"License {c['need']} sites",
-                  f"Your configuration has {c['need']} sites (Cato Socket, vSocket and IPSec). Each needs a site license or "
-                  "a share of pooled bandwidth in the new account.",
-                  [f"Ask your Cato account team to confirm the new account can hold {c['need']} sites."])
+    if k in ("lic_sites_unknown", "lic_sites_short", "lic_sites_none"):
+        ded, pool, bw = c.get("ded", c.get("need", 0)), c.get("pool", 0), c.get("pool_bw", 0)
+        uses = " and ".join(x for x in (
+            f"{_pl(ded, 'site')} {'has its' if ded == 1 else 'have their'} own site license" if ded else "",
+            f"{_pl(pool, 'site')} {'shares' if pool == 1 else 'share'} {bw} Mbps of pooled bandwidth" if pool else "") if x)
+        have = (f" The new account has {_pl(c.get('free_ded', 0), 'free site license')} and {c.get('free_pool', 0)} Mbps "
+                "of free pooled bandwidth." if k == "lic_sites_short" else "")
+        return _g("cato_team", f"License {_pl(c['need'], 'site')}",
+                  f"In your current account, {uses}. The new account needs the same, or those sites can't be "
+                  f"created.{have}",
+                  [f"Ask your Cato account team for {_pl(ded, 'site license')}"
+                   + (f" and {bw} Mbps of pooled bandwidth" if pool else "") + " in the new account."])
     if k in ("lic_skus_unknown", "lic_skus_missing"):
-        return _g("cato_team", f"Match {n} add-on service{'s' if n != 1 else ''}",
-                  "These services are active in your current account. Policies that rely on them behave differently, or "
-                  "can't be created, without them.",
+        return _g("cato_team", f"Match {_pl(n, 'add-on service')}",
+                  ("This service is" if n == 1 else "These services are") + " active in your current account. Policies "
+                  "that rely on " + ("it" if n == 1 else "them") + " behave differently, or can't be created, without "
+                  + ("it." if n == 1 else "them."),
                   ["Review the list with your Cato account team and add the services you want to keep using."])
     if k == "pop_missing":
-        return _g("cato_team", f"Make {n} PoP location{'s' if n != 1 else ''} available, or leave their items out",
+        return _g("cato_team", f"Make {_pl(n, 'PoP location')} available, or leave {'its' if n == 1 else 'their'} items out",
                   f"Some dedicated IP addresses and IPSec tunnels use Cato PoPs ({', '.join(c.get('names', []))}) that "
                   "need a separate entitlement, such as PoPs in China." + affects,
                   ["Ask your Cato account team to add the entitlement for these PoPs.",
@@ -134,25 +159,33 @@ def guide(f):
                           "Add the same members to each group as in your current account."]
             return _g("cma_admin", f"Create {what}" + (" in the CMA" if ng and not nu else ""), why + affects, steps)
         if t == "SCIM":
-            return _g("identity", f"Provision {n} users and groups through SCIM",
+            return _g("identity", f"Provision {_who(c, n)} through SCIM",
                       "Your policy rules refer to these users and groups by name. Your current account receives them from "
                       "your identity provider through SCIM (System for Cross-domain Identity Management), so the new "
                       "account needs the same." + affects,
-                      ["Connect your identity provider to the new account's SCIM integration.",
+                      ["Create the SCIM integration in the new account, and point your identity provider (for example "
+                       "Microsoft Entra ID or Okta) at it.",
                        "Assign the groups and users listed here, and run a sync.",
                        "Confirm they appear in the CMA before the migration starts."])
         if t == "LDAP":
-            return _g("identity", f"Sync {n} users and groups from your directory",
+            return _g("identity", f"Sync {_who(c, n)} from your directory",
                       "Your current account imports these from your directory (LDAP or Active Directory)." + affects,
-                      ["Connect the new account to the same directory and sync these users and groups."])
+                      ["Connect the new account to the same directory.",
+                       "Sync the users and groups listed here, and confirm they appear in the CMA."])
         if t == "DYNAMIC":
-            return _g("cma_admin", f"Turn on {n} dynamic user groups",
-                      "These groups are built automatically from user attributes such as department." + affects,
+            return _g("cma_admin", f"Turn on {_pl(n, 'dynamic user group')}",
+                      ("This group is" if n == 1 else "These groups are") + " built automatically from user attributes "
+                      "such as department." + affects,
                       ["Turn on dynamic user groups for the department attribute, in the CMA or with your migration "
                        "team through the Cato API.",
                        "Confirm the department attribute is filled in for the users these groups should hold."])
-        return _g("migration", f"Review {n} users and groups that no longer exist",
-                  "Your policy rules name these, but they aren't in your current account any more." + affects,
+        if t == "INTEGRATION":
+            return _g("identity", f"Reconnect the integration that provides {_who(c, n)}",
+                      "An identity integration in your current account provides these." + affects,
+                      ["Set up the same integration in the new account and confirm these appear in the CMA."])
+        return _g("migration", f"Review {_who(c, n)} that no longer {'exists' if n == 1 else 'exist'}",
+                  "Your policy rules name " + ("this" if n == 1 else "these") + ", but "
+                  + ("it isn't" if n == 1 else "they aren't") + " in your current account any more." + affects,
                   ["Decide with your migration team whether to tidy these rules before the migration."])
     if k == "id_scim_inactive":
         return _g("identity", "Connect your identity provider to the new account",
@@ -170,10 +203,31 @@ def guide(f):
                   "The SCIM address or token for the new account didn't work.",
                   ["Confirm the SCIM URL and token in the new account's SCIM integration and share them with your "
                    "migration team."])
-    if k in ("cma_missing", "cma_unverified", "cma_undecided"):
-        title = (f"Create {n} {c['one'] if n == 1 else c['many']} in the CMA" if k == "cma_missing"
-                 else f"Confirm {n} {c['one'] if n == 1 else c['many']} exist in the CMA")
-        return _g("cma_admin", title[0].upper() + title[1:], CMA_WHY.get(c.get("kind"), "") + affects, [SAME_NAMES])
+    if k in ("cma_missing", "cma_unverified"):
+        what = f"{n} {c['one'] if n == 1 else c['many']}"
+        title = (f"Create {what} in the CMA" if k == "cma_missing"
+                 else f"Confirm {what} {'exists' if n == 1 else 'exist'} in the CMA")
+        steps = [SAME_NAMES] if k == "cma_missing" else [CHECK_NAMES]
+        return _g("cma_admin", title, CMA_WHY.get(c.get("kind"), "") + affects, steps)
+    if k == "cma_undecided":
+        what = f"{n} {c['one'] if n == 1 else c['many']}"
+        return _g("cma_admin", f"Check {what} in the CMA",
+                  CMA_WHY.get(c.get("kind"), "") + " The check couldn't tell whether "
+                  + ("it exists" if n == 1 else "they exist") + " in the new account." + affects,
+                  [CHECK_NAMES], items=c.get("names") or [x.split(": ", 1)[0] for x in f["items"]])
+    if k == "feat_sanctioned":
+        return _g("cma_admin", "Match your sanctioned applications",
+                  f"{_pl(n, 'policy rule')} {'matches' if n == 1 else 'match'} on your Sanctioned Apps list. The list "
+                  "itself is an account setting that isn't copied, so without it these rules would match different "
+                  "traffic in the new account.",
+                  ["In the CMA, mark the same applications as sanctioned in the new account as in your current account, "
+                   "before the policies are migrated."])
+    if k == "int_unchecked":
+        return _g("migration", f"Confirm {_pl(n, 'object')} your rules name",
+                  "Some rules name network interfaces, floating subnets or value sets. The check can't look these up, "
+                  "and the migration doesn't create them." + affects,
+                  ["Check each one listed here exists in the new account with exactly the same name before the "
+                   "policies are migrated."])
     if k in ("feat_rbi_disabled", "feat_rbi_unverified"):
         return _g("cato_team", "Enable Cato RBI (Remote Browser Isolation)",
                   (f"{n} of your policy rules isolates" if n == 1 else f"{n} of your policy rules isolate")
@@ -201,9 +255,10 @@ def guide(f):
                   "enforcement on the site. It's a per-site setting that can only be changed in the CMA.",
                   ["After the sites exist in the new account, turn on LAN Layer 7 enforcement for the sites listed."])
     if k == "feat_waf_range":
-        return _g("cma_admin", f"Create {n} IP range{'s' if n != 1 else ''} in the CMA",
-                  "This range includes 169.254.169.254, an address the Cato API doesn't accept for security reasons, so "
-                  "it needs to be created by hand." + affects,
+        return _g("cma_admin", f"Create {_pl(n, 'IP range')} in the CMA",
+                  ("This range includes" if n == 1 else "These ranges include") + " 169.254.169.254, an address the "
+                  "Cato API doesn't accept for security reasons, so " + ("it needs" if n == 1 else "they need")
+                  + " to be created by hand." + affects,
                   ["Wait until your migration team tells you the shared objects (the first part of the migration) are in "
                    "place. Creating it before then makes that step fail.",
                    "Then, in the CMA, create the range listed here with the same name and value."])
@@ -240,8 +295,9 @@ def guide(f):
                   "New accounts include sample rules. Some share names with your rules, which would create duplicates.",
                   ["Your migration team will review the sample rules and remove them before the migration."])
     if k == "tgt_existing_named":
-        return _g("migration", f"Review {n} {c.get('label')} that already exist in the new account",
-                  "A fresh migration expects these to be absent.",
+        return _g("migration", f"Review {_pl(n, (c.get('label') or 'items').rstrip('s'))} that already "
+                               f"{'exists' if n == 1 else 'exist'} in the new account",
+                  "A fresh migration expects " + ("this" if n == 1 else "these") + " to be absent.",
                   ["Decide with your migration team whether to adopt or remove them."])
     if k in ("probe_failed", "probe_baseline", "tgt_unreadable", "tgt_rules_existing"):
         return _g("migration", f["title"], f["detail"] or "", [])
@@ -259,7 +315,9 @@ def ready_text(f):
         "pop_summary": f"{c.get('ok')} of {c.get('n')} Cato PoPs your configuration uses are available to the new account.",
         "id_ok": f"All {c.get('n')} users and user groups your rules name exist in the new account.",
         "id_scim_endpoint_ok": "The new account's SCIM integration answers.",
-        "cma_present": f"{c.get('n')} {c.get('one') if c.get('n') == 1 else c.get('many')} your rules use already exist in the new account.",
+        "cma_present": f"{c.get('n')} {c.get('one') if c.get('n') == 1 else c.get('many')} your rules use already "
+                       f"{'exists' if c.get('n') == 1 else 'exist'} in the new account.",
+        "lic_sites_ok": f"The new account has enough site licenses and pooled bandwidth for your {_pl(c.get('need', 0), 'licensed site')}.",
         "feat_rbi_ok": "Cato RBI is enabled in the new account.",
         "feat_swp_ok": "Site Web Proxy rules can be created in the new account.",
         "feat_srt_ok": "Your network ranges don't need Static Range Translation.",
@@ -382,6 +440,21 @@ max-width:1000px;margin:0 auto}
 .app-rules{font-size:12.5px;columns:2;column-gap:26px;color:#333;margin-top:4px}
 .app-rules div{overflow-wrap:anywhere;break-inside:avoid}
 .code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;color:#333;overflow-wrap:anywhere}
+.runbook{break-before:page;margin-top:8px}
+.runbook h2{margin-top:28px}
+.phase{font-family:Archivo,Inter,sans-serif;font-weight:500;font-size:19px;color:var(--pine);margin:26px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--green);break-after:avoid}
+.step{display:grid;grid-template-columns:30px 1fr;gap:12px;margin:0 0 16px;break-inside:avoid}
+.sn{width:28px;height:28px;border-radius:50%;background:var(--green);color:#fff;font-weight:700;font-size:13px;display:flex;align-items:center;justify-content:center}
+.sb h4{font-size:15px;margin:3px 0 4px;color:#1b1b1b}
+.sb p{margin:0 0 8px}
+.before{display:inline-block;font-size:12.5px;background:#fff2c6;color:#5c4500;border-radius:6px;padding:3px 9px;margin:0 0 8px}
+.cmd,.file{position:relative;background:var(--pine);border-radius:8px;margin:0 0 6px}
+.cmd pre,.file pre{margin:0;padding:10px 74px 10px 14px;color:#e8fff7;font:12.5px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.file{background:#f4f7f6;border:1px solid #dfe7e4}.file pre{color:#1b1b1b;padding-right:14px}
+.flabel{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--moss);padding:8px 14px 0}
+.cmd button{position:absolute;top:7px;right:8px;font:600 12px Inter,sans-serif;color:var(--pine);background:var(--hl);border:0;border-radius:6px;padding:4px 10px;cursor:pointer}
+.snote{font-size:13px;color:var(--mid);margin-top:4px}
+.sb code{font:12.5px ui-monospace,Menlo,Consolas,monospace;background:var(--pale);padding:1px 5px;border-radius:4px}
 footer{margin-top:48px;padding-top:16px;border-top:1px solid #e3e3e3;display:flex;gap:18px;align-items:center;font-size:12px;color:var(--mid)}
 footer img{height:20px;width:auto;flex:none}
 @page{size:A4;margin:14mm 12mm}
@@ -390,7 +463,8 @@ footer img{height:20px;width:auto;flex:none}
 .summary{margin-top:22px;grid-template-columns:170px 1fr;gap:24px}.ring{width:160px;height:160px}
 .owner{margin-top:20px}.owner-head{margin-bottom:10px}.item{padding:10px 12px;margin-bottom:8px}
 .item ol{margin-top:2px}.names{font-size:11.5px;padding:6px 10px}.rules-by-policy{font-size:11px}
-.app-item{padding:7px 0}.code{font-size:11px}}
+.app-item{padding:7px 0}.code{font-size:11px}.cmd button{display:none}.cmd pre,.file pre{font-size:10.5px;padding-right:12px}
+.step{margin-bottom:10px}.phase{font-size:16px;margin-top:18px}}
 """
 
 
@@ -422,27 +496,347 @@ def _friendly(text, key=None):
     return t
 
 
+# --------------------------------------------------------------------------
+# Part 2: the runbook. Built from the findings and the run details (meta["run"]),
+# so every command names this pair of accounts, profiles and folders.
+
+PURGE_KEYS = {
+    "internetFirewall": "internet_firewall", "wanFirewall": "wan_firewall", "wanNetwork": "wan_network",
+    "tlsInspect": "tls_inspection", "socketLan": "lan_firewall", "applicationControl": "application_control",
+    "remotePortFwd": "remote_port_forward", "socketBypass": "socket_bypass", "splitTunnel": "split_tunnel",
+    "terminalServer": "terminal_server", "ztnaAlwaysOn": "always_on", "clientConnectivity": "client_connectivity",
+    "dynamicIpAllocation": "dynamic_ip_allocation", "privateAccess": "private_access",
+    "appTenantRestriction": "app_tenant_restriction", "antiMalwareFileHash": "anti_malware_file_hash",
+    "sdpStaticIpAllocation": "sdp_static_ip_allocation", "siteWebProxy": "site_web_proxy",
+}
+# Target export in two halves: one long run can be cut off part way and still exit 0.
+EXPORT_HALVES = [
+    "allocated_ips,amfh_rules,ao_rules,apc_rules,atr_rules,cc_rules,custom_apps,dhcp_relay_groups,dia_rules,"
+    "fqdn_containers,global_ip_ranges,groups,if_rules,interconnect_sites,ip_range_containers,ipsec_sites,lan_fw_rules",
+    "mailing_lists,pa_rules,private_apps,app_connectors,rpf_rules,sb_rules,socket_sites,ssia_rules,st_rules,"
+    "subscription_groups,swp_rules,tls_rules,ts_rules,vsocket_sites,wf_rules,wnw_rules",
+]
+# Which action plan items belong before which deploy step.
+BEFORE_FOUNDATIONS = ("access_same_account", "export_incomplete", "export_hosts_short", "lic_ips_short", "lic_ips_unknown",
+                      "lic_sites_short", "lic_sites_unknown", "lic_sites_none", "pop_missing", "feat_srt", "feat_wifi",
+                      "feat_webhooks", "int_classic", "tgt_existing_named", "access_trial")
+BEFORE_POLICIES = ("id_missing", "id_scim_inactive", "id_ldap_inactive", "id_scim_endpoint_fail", "cma_missing",
+                   "cma_unverified", "cma_undecided", "feat_rbi_disabled", "feat_rbi_unverified", "feat_swp_fail",
+                   "feat_swp_unverified", "feat_sanctioned", "tgt_clash", "lic_ztna_short", "lic_ztna_unknown",
+                   "lic_skus_missing", "lic_skus_unknown", "int_stale", "int_unchecked")
+
+
+def _q(s):
+    s = str(s)
+    return s if re.fullmatch(r"[A-Za-z0-9_./:=@%+-]+", s) else "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+def build_runbook(rep, meta):
+    """Phases of steps: {id, title, text, cmds, file, before (finding keys), note}. Empty without meta['run']."""
+    run = meta.get("run")
+    if not run:
+        return []
+    sp, tp, sa, ta = run["source_profile"], run["target_profile"], run["source_account"], run["target_account"]
+    cfg, tcfg, out = run["config_dir"], run["target_config_dir"], run["out_dir"]
+    mir = " --mirror" if run.get("mirror") else ""
+    fs = {}
+    for f in rep.findings:
+        fs.setdefault(f["key"], []).append(f)
+
+    def has(*keys):
+        return any(k in fs for k in keys)
+
+    def first(key):
+        return fs[key][0] if key in fs else None
+
+    check = (f"python3 scripts/preflight_check.py --source-profile {_q(sp)} --target-profile {_q(tp)}"
+             + (" --probe" if run.get("probe") else "") + (" --lan-l7-confirmed" if run.get("lan_l7_confirmed") else "")
+             + " --pdf" + (f" --config-dir {_q(cfg)}" if cfg != "config_data" else "")
+             + (f" --out-dir {_q(out)}" if out != "preflight" else "")
+             + (f" --customer {_q(run['customer'])}" if run.get("customer") else ""))
+    deploy_all = f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} --keep-going"
+    vexp = f"{out}/target_export"
+
+    def step(sid, title, text, cmds=(), before=(), file=None, note=None):
+        return {"id": sid, "title": title, "text": text, "cmds": list(cmds), "before": [k for k in before if k in fs],
+                "file": file, "note": note}
+
+    setup = [
+        step("tools", "Get the tools and the code",
+             "You need Terraform 1.7 or newer, Python 3, git, and the Cato CLI (catocli 3.3.0 or newer, installed with "
+             "pip, ideally in its own virtual environment). Then download the migration repo and work inside it. Every "
+             "command in this part runs from the cato-bulk-config-management folder.",
+             ["git clone https://github.com/catonetworks/cato-bulk-config-management.git",
+              "cd cato-bulk-config-management"],
+             note=(f"This report was made on a machine that serves Terraform provider {run.get('provider_version')} "
+                   "from a local build in ~/.terraform.d/mirror, so every deploy command below carries --mirror. Build "
+                   "the provider the same way on any other machine, or drop --mirror once those provider fixes are "
+                   "released.") if run.get("mirror") else None),
+        step("keys", "Save the two API keys as profiles",
+             f"Use a view-only key for the current account ({sa}) and a key that can edit for the new account ({ta}). "
+             "Swap in each key, keeping the single quotes. Then check each profile names the right account.",
+             [f"catocli configure set --profile {_q(sp)} --cato-token 'SOURCE_API_KEY' --account-id {sa}",
+              f"catocli configure set --profile {_q(tp)} --cato-token 'TARGET_API_KEY' --account-id {ta}",
+              f"python3 scripts/cato_profile.py {_q(sp)}", f"python3 scripts/cato_profile.py {_q(tp)}"]),
+        step("guard", "Protect the current account",
+             "This stops every script in the repo from changing the current account.",
+             [f"printf '{{\\n  \"protected_accounts\": [\"{sa}\"],\\n  \"protected_profiles\": [\"{sp}\"]\\n}}\\n' > cbcm.config.json"]),
+    ]
+    exported = has("export_ok") and not has("export_incomplete", "export_hosts_short")
+    prepare = [
+        step("export", "Export the current account",
+             "Reads every setting the migration copies into files, and only reads.",
+             [f"CATO_PROFILE={_q(sp)} catocli export all --strip-ids --no-account-suffix --output-directory {_q(cfg)} "
+              f"--archive-directory {_q(cfg + '_archive')}",
+              f"CATO_PROFILE={_q(sp)} catocli export static_hosts --site-type all -f json --output-directory {_q(cfg)}",
+              f"python3 scripts/export_webhooks.py --profile {_q(sp)} --config-dir {_q(cfg)}"],
+             before=("export_incomplete", "export_hosts_short"),
+             note=("Already done for this report. Run it again if the current account changes, then run the check "
+                   "again.") if exported else None),
+        step("recheck", "Work through the action plan, then run this check again",
+             "Each time an item is done, run the check again. It refreshes this report and rewrites the files that "
+             "{step:leaveout} uses.", [check]),
+    ]
+    if has("int_classic"):
+        names = [x.split(": ", 1)[0] for x in first("int_classic")["items"]]
+        prepare.append(step("classic", "Add the legacy groups to the export",
+                            f"Open each of these in the current account's CMA (Resources, Groups) and note its members: "
+                            f"{', '.join(names)}. Add each one to {cfg}/groups.json as an Advanced Group with the same name "
+                            "and members, keeping empty groups empty. Exporting again overwrites this file, so add them "
+                            "again after any new export. Then check the file still reads:",
+                            [f"python3 -m json.tool {_q(cfg + '/groups.json')} > /dev/null && echo \"groups.json is fine\""],
+                            before=("int_classic",)))
+    if has("id_missing", "id_scim_inactive"):
+        prepare.append(step("scim", "Copy users and groups (test accounts only)",
+                            "For a real migration, your identity team provisions users and groups into the new account "
+                            "(the identity items above). For a test account you can copy them instead. Everything copied "
+                            "arrives as SCIM, and the new account needs its SCIM integration created first, with its URL "
+                            "and token added to the profile. The last command copies for real after the dry run before it. "
+                            f"Delete {cfg}/scim_users.csv and scim_groups.csv afterwards: they hold people's names and "
+                            "email addresses.",
+                            [f"catocli configure set --profile {_q(tp)} --cato-token 'TARGET_API_KEY' --account-id {ta} "
+                             "--scim-url 'SCIM_URL' --scim-token 'SCIM_TOKEN'",
+                             f"python3 scripts/scim_sync.py export --source-profile {_q(sp)}",
+                             f"python3 scripts/scim_sync.py push --target-profile {_q(tp)}",
+                             f"python3 scripts/scim_sync.py push --target-profile {_q(tp)} --execute"]))
+    if has("tgt_clash"):
+        fams = [PURGE_KEYS.get(x, x) for x in first("tgt_clash")["ctx"].get("families") or []]
+        if fams:
+            only = ",".join(fams)
+            prepare.append(step("purge", "Clear the sample rules from the new account",
+                                "Only on a brand-new account: this deletes every rule in these policies. The first "
+                                "command lists what it would delete. The second deletes, and asks you to type "
+                                f"{ta} first.",
+                                [f"python3 scripts/purge_all.py --profile {_q(tp)} --only {only}",
+                                 f"python3 scripts/purge_all.py --profile {_q(tp)} --only {only} --execute"],
+                                before=("tgt_clash",)))
+    prepare.append(step("leaveout", "Leave out what isn't ready yet",
+                        "Copies the two exclusion files this check wrote into their folders, then writes "
+                        f"{tcfg}: the export without the rules that wait on anything still missing (Appendix A lists "
+                        "them). With nothing missing it's an identical copy, so always run this step, and run it again "
+                        "after every check.",
+                        [f"cp {_q(out + '/exclude-0-dependencies.auto.tfvars')} 0-dependencies/",
+                         f"cp {_q(out + '/exclude-1-sites.auto.tfvars')} 1-sites/",
+                         f"sh {_q(out + '/scope_command.sh')}"]))
+    if has("feat_wifi"):
+        keys = first("feat_wifi")["items"]
+        prepare.append(step("wifi", "Add the Wi-Fi passwords",
+                            "Open a new file and type each network's real password between the quotes. Terraform uses "
+                            "exactly what's there as the live password, so never leave a placeholder in it. Save with "
+                            "Ctrl+O, then Return, then leave with Ctrl+X.",
+                            ["nano 1-sites/wifi.auto.tfvars"],
+                            file="wifi_ssid_passkeys = {\n" + "\n".join(f'  "{k}" = ""' for k in keys) + "\n}",
+                            before=("feat_wifi",)))
+    if has("feat_webhooks"):
+        names = [x.split(": ", 1)[0] for x in first("feat_webhooks")["items"]]
+        prepare.append(step("webhooks", "Add the webhook secrets",
+                            "Webhooks copy across without their secrets. For each one that signs in, add one line using "
+                            "the shape that matches how it signs in; webhooks that don't sign in need nothing. Without an "
+                            "entry, a webhook that signs in is skipped.",
+                            ["nano 0-dependencies/secrets.auto.tfvars"],
+                            file="# Webhooks in this export: " + ", ".join(names) + "\n"
+                                 "webhook_secrets = {\n"
+                                 '  "WEBHOOK_NAME" = { bearer = { bearer_token = "" } }\n'
+                                 '  # or { basic = { username = "", password = "" } }\n'
+                                 '  # or { custom = { name = "x-api-key", value = "" } }\n}',
+                            before=("feat_webhooks",)))
+    deploy = [
+        step("foundations", "Build the shared objects, sites, app connectors and groups",
+             f"Builds the first four folders in order. It asks you to type {ta} to confirm, then ends with a table: every "
+             "line should say applied. The sites show Disconnected until their Sockets are connected, which is expected.",
+             [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
+              "--folders 0-dependencies,1-sites,2-app-connectors,3-groups"],
+             before=BEFORE_FOUNDATIONS),
+        step("policies", "Add the policies",
+             f"Deploys every policy folder in order and asks for {ta} again. Rules that wait on a missing item stay out "
+             "until {step:after} brings them back.",
+             [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} --keep-going "
+              "--start-at 4-policies/always-on"],
+             before=BEFORE_POLICIES),
+    ]
+    verify = [
+        step("replan", "Confirm Terraform has nothing left to do",
+             "Changes nothing. Every line should say ok, with 0 to add, change or delete.",
+             [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode plan{mir} --config-dir {_q(tcfg)} --keep-going"]),
+        step("export_target", "Export the new account",
+             "In two halves, because one long export can be cut off part way. Check the last lines of each say every "
+             "type succeeded.",
+             [f"CATO_PROFILE={_q(tp)} catocli export all --no-account-suffix --output-directory {_q(vexp)} --types {h}"
+              for h in EXPORT_HALVES]
+             + [f"CATO_PROFILE={_q(tp)} catocli export static_hosts --site-type all -f json --output-directory {_q(vexp)}"]),
+        step("compare", "Check rule order and content against the source",
+             "A plan can't see either. The first should end with ALL ORDERING MATCHES. In the second, the only "
+             "differences to expect are PoP address names (allocationIp), which every account gets its own of.",
+             [f"python3 scripts/order_check.py {_q(tcfg)} {_q(vexp)}",
+              f"python3 scripts/fidelity_check.py {_q(tcfg)} {_q(vexp)}"]),
+    ]
+    finish = []
+    if has("feat_waf_range", "feat_waf_range_early"):
+        names = (first("feat_waf_range") or first("feat_waf_range_early"))["ctx"].get("names") or []
+        finish.append(step("waf", "Create the blocked IP ranges by hand",
+                           f"Now that the shared objects exist, create {', '.join(names)} in the new account's CMA "
+                           "(Resources, IP Ranges) with the same values as in the current account. Then run the check "
+                           "again ({step:recheck}), redo {step:leaveout}, and deploy. Don't skip the first two: the "
+                           "shared objects folder now owns every IP range in the account and would delete one the old "
+                           "exclusion file still leaves out.", [check, deploy_all],
+                           before=("feat_waf_range", "feat_waf_range_early")))
+    if has("feat_l7"):
+        sites = ", ".join(first("feat_l7")["ctx"].get("sites") or [])
+        finish.append(step("l7", "Turn on LAN Layer 7 and add its rules",
+                           f"In the new account's CMA, turn on LAN Layer 7 enforcement for {sites}. The API can't see "
+                           "that switch, so tell the check with --lan-l7-confirmed (keep it on every later run), redo "
+                           "{step:leaveout}, and deploy.",
+                           [check if run.get("lan_l7_confirmed") else check.replace(" --pdf", " --lan-l7-confirmed --pdf"),
+                            deploy_all], before=("feat_l7",)))
+    finish.append(step("after", "Bring left-out rules back in",
+                       "Whenever a missing item arrives in the new account, run the check again, redo {step:leaveout}, "
+                       "and deploy. Folders with nothing new to do say so and change nothing.", [check, deploy_all]))
+    if has("feat_ipsec"):
+        finish.append(step("ipsec", "Add the IPSec tunnels",
+                           "Tunnel settings and pre-shared keys never leave the current account. Add them in the new "
+                           "account's CMA for: " + ", ".join(first("feat_ipsec")["items"]) + ".",
+                           before=("feat_ipsec",)))
+    finish.append(step("hardware", "Connect the Sockets and cloud sites",
+                       "Terraform builds the site configuration, not the hardware. Plan moving each physical Socket and "
+                       "redeploying each cloud vSocket with your Cato account team."))
+    finish.append(step("trouble", "If a step fails",
+                       "Read the error's last lines: they're Cato's own message and usually say what's missing. Fix the "
+                       "cause, then carry on from the folder that failed, using its name from the summary table. Don't "
+                       "change or delete what Terraform built by hand in the CMA, and never delete a terraform.tfstate "
+                       "file.",
+                       [f"python3 scripts/bulk_apply.py --profile {_q(tp)} --mode deploy{mir} --config-dir {_q(tcfg)} "
+                        "--keep-going --start-at 4-policies/internet-firewall"]))
+    phases = [("Set up, once on each machine", setup), ("Prepare", prepare), ("Run the migration", deploy),
+              ("Check the result", verify), ("Finish up", finish)]
+    n, ids = 0, {}
+    for _, steps in phases:
+        for s in steps:
+            n += 1
+            s["n"] = n
+            ids[s["id"]] = n
+    for _, steps in phases:
+        for s in steps:
+            s["text"] = re.sub(r"\{step:(\w+)\}", lambda m: f"step {ids.get(m.group(1), '?')}", s["text"])
+    return phases
+
+
+def _inline(text):
+    return re.sub(r"`([^`]+)`", r"<code>\1</code>", _esc(text))
+
+
+def render_runbook_html(phases, item_nums):
+    if not phases:
+        return ""
+    out = ['<section class="runbook"><div class="eyebrow">Part 2</div><h2>Running the migration</h2>'
+           '<p>For the engineers who run the migration. Every command is set for these two accounts. Only the words in '
+           'CAPITALS are yours to fill in. Steps that say <i>Before this step</i> point at the items in the action plan '
+           'that belong first. Anything still missing is left out by the leave-out step and comes back later, so the '
+           'migration can go ahead without waiting for everything.</p>']
+    for title, steps in phases:
+        out.append(f'<h3 class="phase">{_esc(title)}</h3>')
+        for s in steps:
+            nums = sorted({x for k in s["before"] for x in item_nums.get(k, [])})
+            out.append(f'<div class="step"><div class="sn">{s["n"]}</div><div class="sb"><h4>{_esc(s["title"])}</h4>'
+                       f'<p>{_inline(s["text"])}</p>'
+                       + (f'<div class="before">Before this step: item{"s" if len(nums) != 1 else ""} '
+                          f'{", ".join(str(x) for x in nums)}</div>' if nums else "")
+                       + "".join(f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(c)}</pre></div>'
+                                 for c in s["cmds"])
+                       + (f'<div class="file"><div class="flabel">File contents</div><pre>{_esc(s["file"])}</pre></div>'
+                          if s.get("file") else "")
+                       + (f'<p class="snote">{_esc(s["note"])}</p>' if s.get("note") else "") + "</div></div>")
+    out.append("</section>")
+    return "\n".join(out)
+
+
+def render_runbook_md(phases, titles=None):
+    """Markdown twin of Part 2 for preflight_report.md; 'before' items are named by their finding titles."""
+    if not phases:
+        return []
+    out = ["## Running the migration", "",
+           "Every command runs from the cato-bulk-config-management folder and is set for these two accounts. Only the "
+           "words in CAPITALS are yours to fill in.", ""]
+    for title, steps in phases:
+        out += [f"### {title}", ""]
+        for s in steps:
+            out += [f"**{s['n']}. {s['title']}**", "", s["text"], ""]
+            if s["before"] and titles:
+                out += ["Before this step: " + "; ".join(titles[k] for k in s["before"] if k in titles) + ".", ""]
+            for c in s["cmds"]:
+                out += ["```bash", c, "```", ""]
+            if s.get("file"):
+                out += ["```hcl", s["file"], "```", ""]
+            if s.get("note"):
+                out += [f"*{s['note']}*", ""]
+    return out
+
+
+COPY_JS = """<script>document.querySelectorAll('.cmd button').forEach(function(b){b.addEventListener('click',function(){
+var t=b.nextElementSibling.textContent;function done(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)}
+if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done)}else{var a=document.createElement('textarea');
+a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');done()}catch(e){}document.body.removeChild(a)}})});</script>"""
+
+
+def _shown(rep):
+    """Actionable findings as the customer sees them: directory items that repeat another are folded in."""
+    keys = {(f["key"], f["ctx"].get("type")) for f in rep.findings}
+    out = []
+    for f in rep.findings:
+        if f["severity"] not in ("BLOCKER", "ACTION", "WARN"):
+            continue
+        if f["key"] == "id_scim_inactive" and ("id_missing", "SCIM") in keys:
+            continue
+        if f["key"] == "id_ldap_inactive" and ("id_missing", "LDAP") in keys:
+            continue
+        out.append(f)
+    return out
+
+
 def render_customer_html(rep, exp, meta, customer=None):
     total = len(exp["rules"])
-    blocked = len({r for f in rep.findings if f["severity"] == "BLOCKER" for r in f["rules"]})
-    at_risk = len({r for f in rep.findings if f["severity"] in ("BLOCKER", "ACTION") for r in f["rules"]})
-    ready_now = max(0, total - at_risk)
+    actionable = _shown(rep)
+    # One count everywhere: a rule "waits" if any item in the action plan names it (Appendix A lists them).
+    req_rules = {r for f in actionable if f["severity"] == "BLOCKER" for r in f["rules"]}
+    waits_all = {r for f in actionable for r in f["rules"]}
+    ready_now = max(0, total - len(waits_all))
     pct = ready_now / total if total else 1.0
-    counts = rep.counts()
+    counts = {s: sum(1 for f in actionable if f["severity"] == s) for s in ("BLOCKER", "ACTION", "WARN")}
+    counts["OK"] = sum(1 for f in rep.findings if f["severity"] == "OK")
     if counts["BLOCKER"]:
         status = "Preparation needed"
         lead = (f"{ready_now} of your {total} policy rules can move to the new account as they are. Before the migration "
-                f"starts, {counts['BLOCKER']} item{'s' if counts['BLOCKER'] != 1 else ''} need to be in place and "
-                f"{counts['ACTION']} more need doing or confirming. Each one says who acts, why it matters and what to do.")
+                f"starts, {_pl(counts['BLOCKER'], 'item')} {'needs' if counts['BLOCKER'] == 1 else 'need'} to be in place "
+                f"and {counts['ACTION']} more {'needs' if counts['ACTION'] == 1 else 'need'} doing or confirming. Each one "
+                "says who acts, why it matters and what to do.")
     elif counts["ACTION"]:
         status = "Nearly ready"
-        lead = (f"Nothing stands in the way of the migration. {counts['ACTION']} item{'s' if counts['ACTION'] != 1 else ''} "
-                "need doing or confirming first, listed below with who acts and what to do.")
+        lead = (f"Nothing stands in the way of the migration. {_pl(counts['ACTION'], 'item')} "
+                f"{'needs' if counts['ACTION'] == 1 else 'need'} doing or confirming first, listed below with who acts "
+                "and what to do.")
     else:
         status = "Ready to migrate"
         lead = "Everything this check can verify is in place. Review the notes below, then schedule the migration."
 
-    actionable = [f for f in rep.findings if f["severity"] in ("BLOCKER", "ACTION", "WARN")]
     by_owner = {o[0]: [] for o in OWNERS}
     for f in actionable:
         g = guide(f)
@@ -452,6 +846,7 @@ def render_customer_html(rep, exp, meta, customer=None):
     head_meta = ([("Prepared for", customer)] if customer else []) + [
                  ("Current account", meta["source"]), ("New account", meta["target"]),
                  ("Checked", meta["when"] + (", including live verification" if meta.get("probe") else ""))]
+    other = len(waits_all) - len(req_rules)
     parts = [f"""<!DOCTYPE html><html lang="en-US"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Migration readiness report: {_esc(meta['target'])}</title>
@@ -470,8 +865,9 @@ def render_customer_html(rep, exp, meta, customer=None):
 <div class="stat"><div class="num">{counts['WARN']}</div><div class="lbl">To review</div></div>
 <div class="stat ok"><div class="num">{counts['OK']}</div><div class="lbl">Already in place</div></div>
 </div></div></section>
-<p class="affects">{blocked} of {total} policy rules wait on an item required before migration; {at_risk - blocked} more
-wait on an item to do or confirm.</p>
+<p class="affects">{len(req_rules)} of {total} policy rules wait on an item required before migration{
+    f"; {other} more wait on an item to do, confirm or review" if other else ""}. Part 2 of this report is the
+step-by-step for running the migration.</p>
 <h2>Your action plan</h2>
 <p>Grouped by who acts. Tick each item as it's done, then run the check again to confirm.</p>"""]
 
@@ -480,6 +876,7 @@ wait on an item to do or confirm.</p>
         for f, _ in sorted(by_owner.get(key, []), key=lambda x: order[x[0]["severity"]]):
             seq += 1
             item_no[id(f)] = seq
+    item_nums, item_titles = {}, {}
     for key, name, sub, icon in OWNERS:
         items = sorted(by_owner.get(key, []), key=lambda x: order[x[0]["severity"]])
         if not items:
@@ -487,13 +884,16 @@ wait on an item to do or confirm.</p>
         n_req = sum(1 for f, _ in items if f["severity"] == "BLOCKER")
         parts.append(f'<section class="owner"><div class="owner-head"><div class="ico">{icon}</div>'
                      f'<div><h3>{_esc(name)}</h3><div class="sub">{_esc(sub)}</div></div>'
-                     f'<div class="count">{len(items)} item{"s" if len(items) != 1 else ""}'
+                     f'<div class="count">{_pl(len(items), "item")}'
                      f'{f" &middot; {n_req} required" if n_req else ""}</div></div>')
         for f, g in items:
+            item_nums.setdefault(f["key"], []).append(item_no[id(f)])
+            item_titles.setdefault(f["key"], g["title"])
             label, cls = LABELS[f["severity"]]
             steps = "".join(f"<li>{_esc(s)}</li>" for s in g["steps"])
-            names = f["items"][:16]
-            more = len(f["items"]) - len(names)
+            listed = g.get("items", f["items"])
+            names = listed[:16]
+            more = len(listed) - len(names)
             parts.append(
                 f'<div class="item"><div class="box"></div><div>'
                 f'<span class="chip {cls}">{_esc(label)}</span><h3><span class="no">{item_no[id(f)]}</span>{_esc(g["title"])}</h3>'
@@ -509,12 +909,22 @@ wait on an item to do or confirm.</p>
         parts.append('<h2>Already in place</h2><div class="ready">'
                      + "".join(f"<div>{ICON_CHECK}<span>{_esc(ready_text(f))}</span></div>" for f in ok) + "</div>")
 
-    parts.append("""<h2>What this check can't confirm for you</h2>
-<div class="note"><p>The Cato API doesn't expose a few settings, so please confirm these directly:</p><ul>
-<li>Your identity provider's SCIM or directory settings (the check sees only the users and groups they create).</li>
-<li>Whether Static Range Translation is turned on for the account, if your network ranges translate addresses (the check sees each range's translation, not the account setting).</li>
-<li>LAN Layer 7 enforcement on each site.</li>
-<li>License quantities on a trial account, which doesn't report them.</li></ul></div>""")
+    keys = {f["key"] for f in rep.findings}
+    cant = ["Your identity provider's SCIM or directory settings (the check sees only the users and groups they create)."]
+    if keys & {"feat_srt"}:
+        cant.append("Whether Static Range Translation is turned on for the new account (the check sees each range's "
+                    "translation, not the account setting).")
+    if keys & {"feat_l7", "feat_l7_confirmed"}:
+        cant.append("LAN Layer 7 enforcement on each site.")
+    if keys & {"feat_sanctioned"}:
+        cant.append("Which applications are marked as sanctioned.")
+    if keys & {"access_trial"}:
+        cant.append("License quantities, because the new account is a trial and doesn't report them.")
+    parts.append("<h2>What this check can't confirm for you</h2><div class=\"note\"><p>The Cato API doesn't expose "
+                 + ("this" if len(cant) == 1 else "these") + ", so please confirm directly:</p><ul>"
+                 + "".join(f"<li>{_esc(x)}</li>" for x in cant) + "</ul></div>")
+
+    parts.append(render_runbook_html(build_runbook(rep, meta), item_nums))
 
     # Appendix A: each affected rule once, with the numbered items it waits on.
     waits = {}
@@ -533,23 +943,24 @@ wait on an item to do or confirm.</p>
                        for n, w in sorted(by_pol[pol], key=lambda x: x[0].lower()))
         parts.append(f'<div class="pol"><b>{_esc(pol)}</b>{rows}</div>')
     parts.append("</div>")
-    long_lists = [(f, guide(f)) for f in actionable if len(f["items"]) > 16]
+    long_lists = [(f, guide(f)) for f in actionable if len(guide(f).get("items", f["items"])) > 16]
     if long_lists:
         parts.append('<h2>Full lists</h2>')
         for f, g in long_lists:
             parts.append(f'<div class="app-item"><div class="t">{item_no[id(f)]}. {_esc(g["title"])}</div>'
-                         f'<div class="app-rules">{"".join(f"<div>{_esc(_friendly(x, f["key"]))}</div>" for x in f["items"])}</div></div>')
+                         f'<div class="app-rules">{"".join(f"<div>{_esc(_friendly(x, f["key"]))}</div>" for x in g.get("items", f["items"]))}</div></div>')
     parts.append('<div class="eyebrow" style="margin-top:34px">Appendix B</div><h2>Technical notes for the migration team</h2>')
     for f in sorted(actionable, key=lambda x: order[x["severity"]]):
         if not (f["fix"] or f["detail"]):
             continue
-        parts.append(f'<div class="app-item"><div class="t">{_esc(f["title"])}</div>'
+        parts.append(f'<div class="app-item"><div class="t">{item_no[id(f)]}. {_esc(f["title"])}</div>'
                      + (f'<div class="code">{_esc(f["detail"])}</div>' if f["detail"] else "")
                      + (f'<div class="code">{_esc(f["fix"])}</div>' if f["fix"] else "") + "</div>")
     parts.append("</section>")
     parts.append(f'<footer>{_logo("cato_logo_rgb_color_art_101.svg")}<div>Generated by the migration readiness check '
                  f'(preflight_check.py) on {_esc(meta["when"])}. This report contains configuration names from your '
-                 'accounts; share it only with the people working on your migration.</div></footer></main></body></html>')
+                 'accounts; share it only with the people working on your migration.</div></footer></main>'
+                 + COPY_JS + '</body></html>')
     return "\n".join(parts)
 
 
