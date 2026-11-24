@@ -788,3 +788,97 @@ class ExportSource(unittest.TestCase):
         rep = pc.Report()
         pc.check_permissions(rep, exp, src_denied, tenant(policies={}))
         self.assertEqual([x["key"] for x in rep.findings if x["key"] in ("perm_source", "export_refused")], ["perm_source"])
+
+
+class UnbuildableCustomApps(unittest.TestCase):
+    """Custom applications the API and CMA accept but the Terraform provider refuses: no criteria at all, or a
+    criterion that is only "any protocol". Real accounts have both, exactly as the API returns them."""
+
+    ANY_ROW = {"protocol": "ANY", "port": [], "portRange": [],
+               "destination": {"destinationIp": None, "domain": [], "fqdn": []}}
+    APPS = [{"name": "Empty", "criteria": []},
+            {"name": "HQ", "criteria": [ANY_ROW, {"protocol": "TCP", "port": [], "portRange": [], "destination": {
+                "destinationIp": {"ip": [], "ipRange": [], "subnet": ["192.168.99.0/24"]}, "domain": [], "fqdn": []}}]},
+            {"name": "Fine", "criteria": [{"protocol": "TCP", "port": ["443"], "portRange": [], "destination": None}]}]
+
+    def test_the_provider_rules(self):
+        self.assertEqual(pc.custom_app_problem(self.APPS[0]), "it has no criteria")
+        self.assertIn("only 'any protocol'", pc.custom_app_problem(self.APPS[1]))
+        self.assertIsNone(pc.custom_app_problem(self.APPS[2]))
+        self.assertIsNone(pc.custom_app_problem({"criteria": [dict(self.ANY_ROW, port=["53"])]}))  # ANY on a port is fine
+
+    def _check(self, target_apps):
+        exp = export(rules=[rule("internetFirewall", "Block empty", customApp=[{"name": "Empty"}]),
+                            rule("wanFirewall", "Allow HQ", customApp=[{"name": "HQ"}]),
+                            rule("wanFirewall", "Allow fine", customApp=[{"name": "Fine"}])])
+        exp["custom_apps"] = [dict(a) for a in self.APPS]
+        rep = pc.Report()
+        pc.check_custom_apps(rep, exp, tenant(custom_apps=target_apps), pc.collect_refs(exp["rules"]))
+        return rep
+
+    def test_left_out_of_the_copy_and_their_rules_wait(self):
+        import preflight_report as pr
+        rep = self._check(target_apps={"HQ"})  # HQ was created by hand in the target; Empty wasn't
+        self.assertEqual(rep.drop_custom_apps, {"Empty", "HQ"})  # neither is for 0-dependencies to create
+        self.assertEqual(rep.leave_out, {("customApp", "Empty")})  # only the missing one holds rules back
+        f = [x for x in rep.findings if x["key"] == "custom_app_unbuildable"][0]
+        self.assertEqual((f["severity"], f["ctx"]["n"]), ("BLOCKER", 1))
+        self.assertEqual(list(f["rules"]), ["internetFirewall: Block empty"])
+        self.assertTrue(f["items"][0].startswith("Empty: it has no criteria"))
+        g = pr.guide(f)
+        self.assertEqual(g["owner"], "cma_admin")
+        self.assertIn("Create 1 custom application by hand", g["title"])
+        self.assertIn("custom_app_unbuildable", pr.BEFORE_POLICIES)
+        ok = [x for x in rep.findings if x["key"] == "custom_app_by_hand_present"][0]
+        self.assertIn("already been created in the new account", pr.ready_text(ok))
+
+    def test_nothing_to_say_when_every_app_is_buildable(self):
+        exp = export()
+        exp["custom_apps"] = [self.APPS[2]]
+        rep = pc.Report()
+        pc.check_custom_apps(rep, exp, tenant(custom_apps=set()), {})
+        self.assertEqual((rep.findings, rep.drop_custom_apps), ([], set()))
+
+    def test_scope_script_drops_the_app_and_only_the_missing_ones_rules(self):
+        import json
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        src = os.path.join(d, "config_data")
+        os.makedirs(src)
+        with open(os.path.join(src, "custom_applications.json"), "w") as fh:
+            json.dump(self.APPS, fh)
+        pol = {"data": {"policy": {"wanFirewall": {"policy": {"enabled": True, "sections": [], "rules": [
+            {"rule": {"name": "Allow HQ", "application": {"customApp": [{"name": "HQ"}]}}},
+            {"rule": {"name": "Block empty", "application": {"customApp": [{"name": "Empty"}]}}}]}}}}}
+        with open(os.path.join(src, "all_wf_rules_and_sections.json"), "w") as fh:
+            json.dump(pol, fh)
+        script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts",
+                              "scope_policies_to_target.py")
+        out = os.path.join(d, "config_data_target")
+        r = subprocess.run([sys.executable, script, "--config-dir", src, "--out", out, "--missing", "customApp=Empty",
+                            "--drop-custom-app", "Empty", "--drop-custom-app", "HQ"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(os.path.join(out, "custom_applications.json")) as fh:
+            self.assertEqual([a["name"] for a in json.load(fh)], ["Fine"])
+        with open(os.path.join(out, "all_wf_rules_and_sections.json")) as fh:
+            kept = [x["rule"]["name"] for x in json.load(fh)["data"]["policy"]["wanFirewall"]["policy"]["rules"]]
+        self.assertEqual(kept, ["Allow HQ"])
+        with open(os.path.join(src, "custom_applications.json")) as fh:
+            self.assertEqual(len(json.load(fh)), 3)  # the source export is never modified
+
+    def test_the_validator_says_why_instead_of_missing(self):
+        import json
+        import tempfile
+        import validate_config_data as v
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d)
+        with open(os.path.join(d, "custom_applications.json"), "w") as fh:
+            json.dump(self.APPS, fh)
+        rep = v.Report(greenfield=True)
+        v.check_dependency_list(rep, d, "custom_applications.json", ["name", "criteria"], ["id"])
+        self.assertEqual(len(rep.errors), 2, rep.errors)
+        self.assertIn("'Empty'): it has no criteria, which the Cato Terraform provider refuses", rep.errors[0])
+        self.assertIn("'HQ'): one of its criteria is only 'any protocol'", rep.errors[1])
+        self.assertFalse(any("missing required key 'criteria'" in e for e in rep.errors))
