@@ -76,6 +76,12 @@ cleanly to A4 or Letter. `--pdf` saves a PDF copy alongside it.
 What it holds:
 
 - A cover with the readiness status, the two accounts and when the check ran.
+- Clickable chapters: a contents list under the summary (the action plan by who
+  acts, Part 2 by phase, both appendices), a sidebar that follows you and marks
+  the current chapter on wide screens, and a Contents button on narrower ones.
+  Item numbers in Appendix A, Appendix B and the run book's "Before this step"
+  lines link to the item, and "step N" in the run book links to that step. The
+  links carry into the PDF.
 - A readiness gauge (the share of policy rules that can move as they are) and
   the counts: required before migration, to do or confirm, to review, already in place.
 - **Your action plan**: every item numbered and grouped by who acts (your Cato

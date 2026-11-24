@@ -443,6 +443,24 @@ class CustomerReport(unittest.TestCase):
         self.assertIn("```bash\nsh preflight/scope_command.sh\n```", md)
         self.assertEqual(self.pr.build_runbook(rep, {"source": "", "target": ""}), [])  # no run details, no runbook
 
+    def test_chapters_and_every_link_lands(self):
+        import re
+        rep = pc.Report()
+        rep.add("pops", "BLOCKER", "pop_missing", {"n": 1, "names": ["P"]}, "x", items=["P"], rules=["wanNetwork: A"])
+        rep.add("features", "ACTION", "feat_wifi", {"n": 1}, "w", items=["HQ:Corp"])
+        rep.add("target", "ACTION", "tgt_clash", {"n": 1, "families": ["internetFirewall"]}, "c", items=["internetFirewall: 1 (X)"])
+        rep.add("export", "OK", "export_ok", {"rules": 2, "policies": 1}, "z")
+        out = self.pr.render_customer_html(rep, export(rules=[rule("wanNetwork", "A"), rule("wanNetwork", "B")]), self._meta())
+        ids = set(re.findall(r'\sid="([^"]+)"', out))
+        hrefs = set(re.findall(r'href="#([^"]+)"', out))
+        self.assertFalse(hrefs - ids, f"links with no target: {sorted(hrefs - ids)}")
+        for chapter in ("summary", "plan", "ready", "cant", "part2", "phase-1", "appendix-a", "appendix-b", "item-1", "step-1"):
+            self.assertIn(chapter, ids)
+            self.assertIn(chapter, hrefs | {"item-1", "step-1"})
+        self.assertIn('class="toc-side"', out)
+        self.assertIn('<a href="#item-1">1</a>', out)  # Appendix A and "Before this step" link to the item
+        self.assertIn('<a href="#step-', out)  # "redo step N" in the run book links to that step
+
     def test_modified_logo_is_left_out(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:

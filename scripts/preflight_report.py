@@ -440,6 +440,27 @@ max-width:1000px;margin:0 auto}
 .app-rules{font-size:12.5px;columns:2;column-gap:26px;color:#333;margin-top:4px}
 .app-rules div{overflow-wrap:anywhere;break-inside:avoid}
 .code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;color:#333;overflow-wrap:anywhere}
+html{scroll-behavior:smooth}
+[id]{scroll-margin-top:18px}
+.page a{color:var(--moss)}
+.toc{margin:26px 0 6px;padding:16px 22px 14px;border:1px solid #e3e3e3;border-radius:12px;break-inside:avoid}
+.toc>ol{columns:2;column-gap:34px;margin:8px 0 0;padding-left:20px}
+.toc li{break-inside:avoid;margin:3px 0}
+.toc ol ol{margin:2px 0 8px;padding-left:14px;list-style:none;font-size:13px}
+.toc a{color:var(--forest);text-decoration:none;font-weight:600}.toc ol ol a{font-weight:400}
+.toc a:hover{text-decoration:underline}
+.tc{color:var(--mid);font-size:12px;margin-left:3px;white-space:nowrap}
+.toc-side{display:none}
+.totop{position:fixed;right:18px;bottom:18px;background:var(--forest);color:#fff!important;padding:8px 16px;border-radius:999px;
+font-size:13px;font-weight:700;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+@media screen and (min-width:1500px){.toc-side{display:block;position:fixed;top:24px;left:max(16px,calc(50% - 770px));
+width:230px;max-height:calc(100vh - 48px);overflow:auto;font-size:13px;line-height:1.35}
+.toc-side .eyebrow{margin:0 0 8px 10px}.toc-side ol{list-style:none;padding:0;margin:0}
+.toc-side ol ol{padding-left:12px;margin:1px 0 6px}
+.toc-side a{display:block;padding:4px 10px;border-left:2px solid #e3e3e3;color:var(--dark);text-decoration:none}
+.toc-side a:hover{color:var(--pine);background:#f4f8f6}
+.toc-side a.on{border-left-color:var(--green);color:var(--pine);font-weight:700;background:#eef7f3}
+.toc-side .tc{display:none}.totop{display:none}}
 .runbook{break-before:page;margin-top:8px}
 .runbook h2{margin-top:28px}
 .phase{font-family:Archivo,Inter,sans-serif;font-weight:500;font-size:19px;color:var(--pine);margin:26px 0 10px;padding-bottom:6px;border-bottom:2px solid var(--green);break-after:avoid}
@@ -464,7 +485,9 @@ footer img{height:20px;width:auto;flex:none}
 .owner{margin-top:20px}.owner-head{margin-bottom:10px}.item{padding:10px 12px;margin-bottom:8px}
 .item ol{margin-top:2px}.names{font-size:11.5px;padding:6px 10px}.rules-by-policy{font-size:11px}
 .app-item{padding:7px 0}.code{font-size:11px}.cmd button{display:none}.cmd pre,.file pre{font-size:10.5px;padding-right:12px}
-.step{margin-bottom:10px}.phase{font-size:16px;margin-top:18px}}
+.step{margin-bottom:10px}.phase{font-size:16px;margin-top:18px}
+.toc-side,.totop{display:none!important}.toc{margin-top:14px;padding:10px 16px}.toc li{margin:1px 0}
+a{text-decoration:none}}
 """
 
 
@@ -741,7 +764,12 @@ def build_runbook(rep, meta):
 
 
 def _inline(text):
-    return re.sub(r"`([^`]+)`", r"<code>\1</code>", _esc(text))
+    t = re.sub(r"`([^`]+)`", r"<code>\1</code>", _esc(text))
+    return re.sub(r"\bstep (\d+)\b", r'<a href="#step-\1">step \1</a>', t)
+
+
+def _item_links(nums):
+    return ", ".join(f'<a href="#item-{x}">{x}</a>' for x in nums)
 
 
 def render_runbook_html(phases, item_nums):
@@ -752,14 +780,14 @@ def render_runbook_html(phases, item_nums):
            'CAPITALS are yours to fill in. Steps that say <i>Before this step</i> point at the items in the action plan '
            'that belong first. Anything still missing is left out by the leave-out step and comes back later, so the '
            'migration can go ahead without waiting for everything.</p>']
-    for title, steps in phases:
-        out.append(f'<h3 class="phase">{_esc(title)}</h3>')
+    for i, (title, steps) in enumerate(phases, 1):
+        out.append(f'<h3 class="phase" id="phase-{i}">{_esc(title)}</h3>')
         for s in steps:
             nums = sorted({x for k in s["before"] for x in item_nums.get(k, [])})
-            out.append(f'<div class="step"><div class="sn">{s["n"]}</div><div class="sb"><h4>{_esc(s["title"])}</h4>'
+            out.append(f'<div class="step" id="step-{s["n"]}"><div class="sn">{s["n"]}</div><div class="sb"><h4>{_esc(s["title"])}</h4>'
                        f'<p>{_inline(s["text"])}</p>'
                        + (f'<div class="before">Before this step: item{"s" if len(nums) != 1 else ""} '
-                          f'{", ".join(str(x) for x in nums)}</div>' if nums else "")
+                          f'{_item_links(nums)}</div>' if nums else "")
                        + "".join(f'<div class="cmd"><button type="button">Copy</button><pre>{_esc(c)}</pre></div>'
                                  for c in s["cmds"])
                        + (f'<div class="file"><div class="flabel">File contents</div><pre>{_esc(s["file"])}</pre></div>'
@@ -795,6 +823,23 @@ COPY_JS = """<script>document.querySelectorAll('.cmd button').forEach(function(b
 var t=b.nextElementSibling.textContent;function done(){b.textContent='Copied';setTimeout(function(){b.textContent='Copy'},1500)}
 if(navigator.clipboard&&window.isSecureContext){navigator.clipboard.writeText(t).then(done)}else{var a=document.createElement('textarea');
 a.value=t;document.body.appendChild(a);a.select();try{document.execCommand('copy');done()}catch(e){}document.body.removeChild(a)}})});</script>"""
+
+
+def _toc(entries, cls, label):
+    """entries: (anchor, title, note, children) with children as (anchor, title, note)."""
+    def li(a, t, note):
+        return f'<a href="#{a}">{_esc(t)}</a>' + (f' <span class="tc">{_esc(note)}</span>' if note else "")
+    rows = "".join(f'<li>{li(a, t, n)}' + (f'<ol>{"".join(f"<li>{li(*c)}</li>" for c in kids)}</ol>' if kids else "") + "</li>"
+                   for a, t, n, kids in entries)
+    ident = ' id="contents"' if cls == "toc" else ""
+    return f'<nav class="{cls}"{ident} aria-label="{label}"><div class="eyebrow">Contents</div><ol>{rows}</ol></nav>'
+
+
+NAV_JS = """<script>(function(){var links=document.querySelectorAll('.toc-side a'),map={};
+links.forEach(function(a){map[a.getAttribute('href').slice(1)]=a});if(!('IntersectionObserver' in window))return;
+var obs=new IntersectionObserver(function(es){es.forEach(function(e){if(!e.isIntersecting)return;
+links.forEach(function(a){a.classList.remove('on')});var a=map[e.target.id];if(a)a.classList.add('on')})},
+{rootMargin:'0px 0px -70% 0px'});Object.keys(map).forEach(function(id){var el=document.getElementById(id);if(el)obs.observe(el)})})();</script>"""
 
 
 def _shown(rep):
@@ -858,7 +903,7 @@ def render_customer_html(rep, exp, meta, customer=None):
 <h1>Getting your new Cato account ready for migration</h1>
 <div class="meta">{''.join(f'<span>{_esc(k)}: <b>{_esc(v)}</b></span>' for k, v in head_meta)}</div></header>
 <main class="page">
-<section class="summary">{_ring(pct)}<div><p class="lead">{_esc(lead)}</p>
+<section class="summary" id="summary">{_ring(pct)}<div><p class="lead">{_esc(lead)}</p>
 <div class="stats">
 <div class="stat req"><div class="num">{counts['BLOCKER']}</div><div class="lbl">Required before migration</div></div>
 <div class="stat todo"><div class="num">{counts['ACTION']}</div><div class="lbl">To do or confirm</div></div>
@@ -868,7 +913,8 @@ def render_customer_html(rep, exp, meta, customer=None):
 <p class="affects">{len(req_rules)} of {total} policy rules wait on an item required before migration{
     f"; {other} more wait on an item to do, confirm or review" if other else ""}.{
     ' <a href="#part2">Part 2</a> of this report is the step-by-step for running the migration.' if meta.get("run") else ""}</p>
-<h2>Your action plan</h2>
+<!--TOC-->
+<h2 id="plan">Your action plan</h2>
 <p>Grouped by who acts. Tick each item as it's done, then run the check again to confirm.</p>"""]
 
     item_no, seq = {}, 0
@@ -882,7 +928,7 @@ def render_customer_html(rep, exp, meta, customer=None):
         if not items:
             continue
         n_req = sum(1 for f, _ in items if f["severity"] == "BLOCKER")
-        parts.append(f'<section class="owner"><div class="owner-head"><div class="ico">{icon}</div>'
+        parts.append(f'<section class="owner" id="owner-{key}"><div class="owner-head"><div class="ico">{icon}</div>'
                      f'<div><h3>{_esc(name)}</h3><div class="sub">{_esc(sub)}</div></div>'
                      f'<div class="count">{_pl(len(items), "item")}'
                      f'{f" &middot; {n_req} required" if n_req else ""}</div></div>')
@@ -895,7 +941,7 @@ def render_customer_html(rep, exp, meta, customer=None):
             names = listed[:16]
             more = len(listed) - len(names)
             parts.append(
-                f'<div class="item"><div class="box"></div><div>'
+                f'<div class="item" id="item-{item_no[id(f)]}"><div class="box"></div><div>'
                 f'<span class="chip {cls}">{_esc(label)}</span><h3><span class="no">{item_no[id(f)]}</span>{_esc(g["title"])}</h3>'
                 f'<p class="why">{_esc(g["why"])}</p>'
                 + (f'<div class="what">What to do</div><ol>{steps}</ol>' if steps else "")
@@ -906,7 +952,7 @@ def render_customer_html(rep, exp, meta, customer=None):
 
     ok = [f for f in rep.findings if f["severity"] == "OK"]
     if ok:
-        parts.append('<h2>Already in place</h2><div class="ready">'
+        parts.append('<h2 id="ready">Already in place</h2><div class="ready">'
                      + "".join(f"<div>{ICON_CHECK}<span>{_esc(ready_text(f))}</span></div>" for f in ok) + "</div>")
 
     keys = {f["key"] for f in rep.findings}
@@ -920,18 +966,19 @@ def render_customer_html(rep, exp, meta, customer=None):
         cant.append("Which applications are marked as sanctioned.")
     if keys & {"access_trial"}:
         cant.append("License quantities, because the new account is a trial and doesn't report them.")
-    parts.append("<h2>What this check can't confirm for you</h2><div class=\"note\"><p>The Cato API doesn't expose "
+    parts.append("<h2 id=\"cant\">What this check can't confirm for you</h2><div class=\"note\"><p>The Cato API doesn't expose "
                  + ("this" if len(cant) == 1 else "these") + ", so please confirm directly:</p><ul>"
                  + "".join(f"<li>{_esc(x)}</li>" for x in cant) + "</ul></div>")
 
-    parts.append(render_runbook_html(build_runbook(rep, meta), item_nums))
+    phases = build_runbook(rep, meta)
+    parts.append(render_runbook_html(phases, item_nums))
 
     # Appendix A: each affected rule once, with the numbered items it waits on.
     waits = {}
     for f in actionable:
         for r in f["rules"]:
             waits.setdefault(r, set()).add(item_no[id(f)])
-    parts.append('<section class="appendix"><div class="eyebrow">Appendix A</div><h2>Policy rules and what they wait on</h2>'
+    parts.append('<section class="appendix" id="appendix-a"><div class="eyebrow">Appendix A</div><h2>Policy rules and what they wait on</h2>'
                  f'<p>{len(waits)} of your {total} policy rules wait on at least one item. The numbers match the items in '
                  'your action plan.</p><div class="rules-by-policy">')
     by_pol = {}
@@ -939,28 +986,46 @@ def render_customer_html(rep, exp, meta, customer=None):
         fam, _, name = r.partition(": ")
         by_pol.setdefault(FAMILY_NAMES.get(fam, fam), []).append((name, waits[r]))
     for pol in sorted(by_pol):
-        rows = "".join(f'<div class="r"><span>{_esc(_friendly(n))}</span><span>{", ".join(str(x) for x in sorted(w))}</span></div>'
+        rows = "".join(f'<div class="r"><span>{_esc(_friendly(n))}</span><span>{_item_links(sorted(w))}</span></div>'
                        for n, w in sorted(by_pol[pol], key=lambda x: x[0].lower()))
         parts.append(f'<div class="pol"><b>{_esc(pol)}</b>{rows}</div>')
     parts.append("</div>")
     long_lists = [(f, guide(f)) for f in actionable if len(guide(f).get("items", f["items"])) > 16]
     if long_lists:
-        parts.append('<h2>Full lists</h2>')
+        parts.append('<h2 id="full-lists">Full lists</h2>')
         for f, g in long_lists:
-            parts.append(f'<div class="app-item"><div class="t">{item_no[id(f)]}. {_esc(g["title"])}</div>'
+            parts.append(f'<div class="app-item"><div class="t"><a href="#item-{item_no[id(f)]}">{item_no[id(f)]}</a>. {_esc(g["title"])}</div>'
                          f'<div class="app-rules">{"".join(f"<div>{_esc(_friendly(x, f["key"]))}</div>" for x in g.get("items", f["items"]))}</div></div>')
-    parts.append('<div class="eyebrow" style="margin-top:34px">Appendix B</div><h2>Technical notes for the migration team</h2>')
+    parts.append('<div class="eyebrow" style="margin-top:34px">Appendix B</div><h2 id="appendix-b">Technical notes for the migration team</h2>')
     for f in sorted(actionable, key=lambda x: order[x["severity"]]):
         if not (f["fix"] or f["detail"]):
             continue
-        parts.append(f'<div class="app-item"><div class="t">{item_no[id(f)]}. {_esc(f["title"])}</div>'
+        parts.append(f'<div class="app-item"><div class="t"><a href="#item-{item_no[id(f)]}">{item_no[id(f)]}</a>. {_esc(f["title"])}</div>'
                      + (f'<div class="code">{_esc(f["detail"])}</div>' if f["detail"] else "")
                      + (f'<div class="code">{_esc(f["fix"])}</div>' if f["fix"] else "") + "</div>")
     parts.append("</section>")
     parts.append(f'<footer>{_logo("cato_logo_rgb_color_art_101.svg")}<div>Generated by the migration readiness check '
                  f'(preflight_check.py) on {_esc(meta["when"])}. This report contains configuration names from your '
                  'accounts; share it only with the people working on your migration.</div></footer></main>'
-                 + COPY_JS + '</body></html>')
+                 + COPY_JS + NAV_JS + '</body></html>')
+
+    # Chapters, now that every section and its numbers are known.
+    owners = [(f"owner-{k}", name, _pl(len(by_owner[k]), "item"), ()) for k, name, _, _ in OWNERS if by_owner.get(k)]
+    entries = [("summary", "Readiness summary", None, ()),
+               ("plan", "Your action plan", _pl(len(actionable), "item"), [o[:3] for o in owners])]
+    if ok:
+        entries.append(("ready", "Already in place", None, ()))
+    entries.append(("cant", "What this check can't confirm", None, ()))
+    if phases:
+        kids = [(f"phase-{i}", t, f"steps {st[0]['n']} to {st[-1]['n']}" if len(st) > 1 else f"step {st[0]['n']}")
+                for i, (t, st) in enumerate(phases, 1)]
+        entries.append(("part2", "Part 2: Running the migration", None, kids))
+    entries.append(("appendix-a", "Appendix A: Policy rules and what they wait on", None, ()))
+    if long_lists:
+        entries.append(("full-lists", "Full lists", None, ()))
+    entries.append(("appendix-b", "Appendix B: Technical notes", None, ()))
+    toc = _toc(entries, "toc", "Contents") + _toc(entries, "toc-side", "Chapters") + '<a class="totop" href="#contents">Contents</a>'
+    parts[0] = parts[0].replace("<!--TOC-->", toc, 1)
     return "\n".join(parts)
 
 
