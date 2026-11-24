@@ -308,6 +308,16 @@ def collect_refs(rules):
 class Report:
     def __init__(self):
         self.findings = []
+        # What the target still lacks, for the leave-out files (write_leave_out):
+        self.leave_out = set()   # (rule JSON key, name) the scope script treats as missing
+        self.skip_rules = set()  # rule names to leave out for a non-reference reason
+        self.exclude = {"global_ip_ranges_exclude": set(), "allocated_ips_exclude": set(),
+                        "ipsec_sites_exclude": set()}
+
+    def skip(self, labels):
+        """'family: name' labels -> rule names as scope_policies_to_target.py expects them."""
+        for lab in labels:
+            self.skip_rules.add(lab.split(": ", 1)[-1].replace(" :: ", " / "))
 
     def add(self, category, severity, key, ctx, title, detail="", items=None, fix="", rules=None):
         """key: stable finding id the customer report phrases; ctx: the numbers/names it needs."""
@@ -645,11 +655,19 @@ def check_pops(rep, exp, src, tgt, refs):
     for p in missing:
         dep_rules |= set(refs.get("popLocation", {}).get(p, []))
     if missing:
+        lost_subnets = {n for n in refs.get("siteNetworkSubnet", {}) if n.split(" \\ ")[0] in lost_sites}
+        rep.leave_out |= {(k, n) for n in lost_ips for k in ("allocationIp", "externalIp")}
+        rep.leave_out |= {(k, n) for n in lost_sites for k in ("site", "backhaulingSite", "associatedSite")}
+        rep.leave_out |= {("siteNetworkSubnet", n) for n in lost_subnets} | {("popLocation", p) for p in missing}
+        rep.exclude["allocated_ips_exclude"] |= lost_ips
+        rep.exclude["ipsec_sites_exclude"] |= lost_sites
         rep.add(cat, "BLOCKER", "pop_missing", {"n": len(missing), "names": sorted(missing)}, f"{len(missing)} PoP location(s) the source uses are not available to the target",
-                items=[f"{p}: used by {len(u)} item{'s' if len(u) != 1 else ''}, e.g. {u[0]}" for p, u in sorted(missing.items())],
-                fix="China and private PoPs need their own entitlement. Get it added, or leave these allocations and "
-                    "the sites/rules on them out with `allocated_ips_exclude` / `ipsec_sites_exclude` "
-                    "(and scripts/scope_policies_to_target.py).", rules=dep_rules)
+                items=[f"{p}: used by {len(u)} item{'s' if len(u) != 1 else ''}: {'; '.join(u)}" for p, u in sorted(missing.items())],
+                fix="China and private PoPs need their own entitlement. Get it added, or leave these out: "
+                    f"`allocated_ips_exclude = {json.dumps(sorted(lost_ips))}` in 0-dependencies and "
+                    f"`ipsec_sites_exclude = {json.dumps(sorted(lost_sites))}` in 1-sites (the exclude-*.auto.tfvars "
+                    "files written next to this report hold exactly these), plus scope_command.sh for the rules.",
+                rules=dep_rules)
     rep.add(cat, "OK" if not missing else "INFO", "pop_summary", {"ok": len(needed) - len(missing), "n": len(needed)},
             f"{len(needed) - len(missing)} of {len(needed)} PoP locations used by the source are available to the target")
 
@@ -676,6 +694,7 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
         itype = (s_groups.get(name) or {}).get("importType") or "NOT IN SOURCE"
         by_type[itype].append(f"user group '{name}' ({len(rules)} rule(s))")
         kinds[itype]["groups"] += 1
+        rep.leave_out.add(("usersGroup", name))
         missing_rules.update(rules)
         type_rules[itype].update(rules)
     for name, rules in sorted(refs.get("user", {}).items()):
@@ -685,6 +704,7 @@ def check_identity(rep, exp, src, tgt, refs, target_api):
         itype = (su or {}).get("userImportType") or "NOT IN SOURCE"
         by_type[itype].append(f"user '{name}' ({len(rules)} rule(s))")
         kinds[itype]["users"] += 1
+        rep.leave_out.add(("user", name))
         missing_rules.update(rules)
         type_rules[itype].update(rules)
     fixes = {
@@ -757,6 +777,7 @@ def check_cma_only(rep, refs, probes):
             missing = sorted(n for n, (st, _) in states.items() if st == "MISSING")
             unknown = sorted(n for n, (st, _) in states.items() if st not in ("MISSING", "PRESENT"))
             if missing:
+                rep.leave_out |= {(kind, n) for n in missing}
                 rep.add(cat, "BLOCKER", "cma_missing", {"kind": kind, "n": len(missing), "one": one, "many": many}, f"{len(missing)} {noun(len(missing))} missing in the target (verified by probe)",
                         items=[f"{n}: {_uses(refs, kind, n)}" for n in missing], rules=_rules_for(refs, kind, missing),
                         fix="Create them in the target CMA with exactly the same names. The API cannot create or list them.")
@@ -780,6 +801,7 @@ def check_features(rep, exp, refs, probes):
     if rbi_rules:
         state = ((probes or {}).get("features") or {}).get("rbi")
         if state and state[0] == "DISABLED":
+            rep.skip(rbi_rules)
             rep.add(cat, "BLOCKER", "feat_rbi_disabled", {"n": len(rbi_rules)}, "Remote Browser Isolation is disabled in the target (verified by probe)",
                     items=rbi_rules, rules=rbi_rules, fix="Enable RBI on the target (license/feature) before the Internet Firewall.")
         elif state and state[0] == "ENABLED":
@@ -793,6 +815,7 @@ def check_features(rep, exp, refs, probes):
         if state and state[0] == "ENABLED":
             rep.add(cat, "OK", "feat_swp_ok", {}, "Site Web Proxy rules can be created in the target")
         elif state:
+            rep.skip(swp_rules)
             rep.add(cat, "BLOCKER", "feat_swp_fail", {"n": len(swp_rules)}, "Site Web Proxy rules cannot be created in the target (verified by probe)",
                     detail=state[1][:300], items=swp_rules, rules=swp_rules,
                     fix="Ask Cato to enable Site Web Proxy for the target account. 'Unsupported field [addRule]' with "
@@ -835,6 +858,7 @@ def check_features(rep, exp, refs, probes):
             l7.append(f'{r["name"]} (sites: {", ".join(sites) or "every site the network rule covers"})')
             l7_rules.append(f'{r["family"]}: {r["name"]}')
     if l7:
+        rep.skip(l7_rules)
         rep.add(cat, "ACTION", "feat_l7", {"n": len(l7), "sites": sorted({x.rsplit("(sites: ", 1)[-1].rstrip(")") for x in l7})}, f"{len(l7)} LAN firewall rule(s) match on applications or services (Layer 7)",
                 items=l7, rules=l7_rules,
                 fix="Turn on LAN Layer 7 enforcement for those sites in the target CMA after the sites exist, or the "
@@ -843,6 +867,8 @@ def check_features(rep, exp, refs, probes):
 
     waf = [g for g in exp["global_ip_ranges"] if "169.254.169.254" in json.dumps(g)]
     if waf:
+        rep.leave_out |= {("globalIpRange", g.get("name")) for g in waf}
+        rep.exclude["global_ip_ranges_exclude"] |= {g.get("name") for g in waf}
         rep.add(cat, "BLOCKER", "feat_waf_range", {"n": len(waf), "names": [g.get("name") for g in waf]}, "Global IP range(s) containing 169.254.169.254: the API's web firewall rejects any "
                                 "request that carries this address", items=[g.get("name") for g in waf],
                 fix="Create them by hand in the target CMA, then keep their names in `global_ip_ranges_exclude` "
@@ -876,33 +902,41 @@ def check_integrity(rep, exp, src, refs):
         rep.add(cat, "OK", "int_classic_done", {"n": len(done)}, f"{len(done)} classic group(s) the API cannot see are already in groups.json as Advanced Groups",
                 items=done)
     if classic:
+        rep.leave_out |= {("group", n) for n in classic}
         rep.add(cat, "ACTION", "int_classic", {"n": len(classic)}, f"{len(classic)} group(s) the rules use are invisible to the groups API (classic groups)",
                 items=[f"{n}: {len(r)} rule(s)" for n, r in sorted(classic.items())], rules=_rules_for(refs, "group", classic),
                 fix="Read their members in the source CMA and add them to config_data/groups.json as Advanced Groups "
                     "(keep empty ones empty: an empty group matches nothing; dropping it from a rule matches everything).")
     site_names = set(exp["sites"])
     stale = defaultdict(set)
+    stale_refs = set()
     for kind in ("site", "backhaulingSite", "associatedSite"):
         for n, rules in refs.get(kind, {}).items():
             if n not in site_names:
                 stale[f"site '{n}'"].update(rules)
+                stale_refs.add((kind, n))
     for n, rules in refs.get("siteNetworkSubnet", {}).items():
         site = n.split(" \\ ")[0]
         if site not in site_names:
             stale[f"subnet '{n}'"].update(rules)
+            stale_refs.add(("siteNetworkSubnet", n))
     ga = {g.get("name") for g in exp["global_ip_ranges"]}
     for n, rules in refs.get("globalIpRange", {}).items():
         if n not in ga:
             stale[f"global IP range '{n}'"].update(rules)
+            stale_refs.add(("globalIpRange", n))
     ca = {c.get("name") for c in exp["custom_apps"]} if isinstance(exp["custom_apps"], list) else set()
     for n, rules in refs.get("customApp", {}).items():
         if ca and n not in ca:
             stale[f"custom app '{n}'"].update(rules)
+            stale_refs.add(("customApp", n))
     an = {a.get("name") for a in exp["allocated_ips"]}
     for kind in ("allocationIp", "externalIp"):
         for n, rules in refs.get(kind, {}).items():
             if n not in an:
                 stale[f"allocated IP '{n}'"].update(rules)
+                stale_refs.add((kind, n))
+    rep.leave_out |= stale_refs
     if stale:
         rep.add(cat, "WARN", "int_stale", {"n": len(stale)}, f"{len(stale)} reference(s) point at objects that are not in the source export",
                 items=[f"{k}: {len(v)} rule(s), e.g. {sorted(v)[0]}" for k, v in sorted(stale.items())],
@@ -1035,6 +1069,45 @@ def render_markdown(rep, exp, meta):
     return "\n".join(out) + "\n"
 
 
+def write_leave_out(rep, config_dir, out_dir):
+    """Write what it takes to leave out everything the target still lacks.
+
+    scope_command.sh rebuilds <config_dir>_target from the export minus every rule
+    that waits on something still missing (an identical copy when nothing is), and
+    exclude-0-dependencies.auto.tfvars / exclude-1-sites.auto.tfvars hold the
+    exclusion lists for those two folders. Rerun the check after fixing anything
+    and the files are rewritten to match. Wi-Fi passwords are never written here:
+    a placeholder would be accepted by 1-sites and go live as the real password.
+    """
+    import shlex
+    config_dir = os.path.abspath(config_dir)
+    out_dir = os.path.abspath(out_dir)
+    target_dir = config_dir.rstrip(os.sep) + "_target"
+    args = ["python3", os.path.join(REPO_ROOT, "scripts", "scope_policies_to_target.py"),
+            "--config-dir", config_dir, "--out", target_dir,
+            "--report", os.path.join(out_dir, "scope_report.json")]
+    extra = [f"--missing {shlex.quote(f'{k}={n}')}" for k, n in sorted(rep.leave_out) if n] + \
+            [f"--skip-rule {shlex.quote(n)}" for n in sorted(rep.skip_rules) if n]
+    lines = ["#!/bin/sh",
+             "# Written by preflight_check.py. Makes " + target_dir,
+             "# from the export, leaving out every rule that waits on something the target still lacks",
+             f"# ({len(rep.leave_out)} missing reference(s), {len(rep.skip_rules)} rule(s) left out by name).",
+             "# Fix what you can, run the check again, and this file is rewritten to match.",
+             " ".join(shlex.quote(a) for a in args) + (" \\" if extra else "")]
+    lines += [f"  {a}" + (" \\" if i < len(extra) - 1 else "") for i, a in enumerate(extra)]
+    with open(os.path.join(out_dir, "scope_command.sh"), "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    folders = {"0-dependencies": ("global_ip_ranges_exclude", "allocated_ips_exclude"),
+               "1-sites": ("ipsec_sites_exclude",)}
+    for folder, names in folders.items():
+        body = [f"# Written by preflight_check.py: what {folder} leaves out on this target.",
+                "# Copy it into the folder unchanged. Empty lists mean nothing is left out."]
+        body += [f"{n} = {json.dumps(sorted(rep.exclude[n]))}" for n in names]
+        with open(os.path.join(out_dir, f"exclude-{folder}.auto.tfvars"), "w") as fh:
+            fh.write("\n".join(body) + "\n")
+    return ["scope_command.sh", "exclude-0-dependencies.auto.tfvars", "exclude-1-sites.auto.tfvars"]
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
@@ -1112,6 +1185,7 @@ def main():
     with open(html_path, "w") as fh:
         fh.write(render_customer_html(rep, exp, meta, customer=args.customer))
     written = ["preflight_report.md", "preflight_report.json", "preflight_report.html"]
+    written += write_leave_out(rep, args.config_dir, args.out_dir)
     if args.pdf:
         err = html_to_pdf(html_path, os.path.join(args.out_dir, "preflight_report.pdf"))
         if err:

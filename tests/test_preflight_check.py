@@ -128,6 +128,61 @@ class Checks(unittest.TestCase):
         self.assertEqual(sev, ["ACTION", "OK"])
 
 
+def _read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+class LeaveOut(unittest.TestCase):
+    """The check writes the scope command and exclusion files for whatever is still missing."""
+
+    def _report(self):
+        refs = pc.collect_refs([rule("wanNetwork", "W1", bandwidthPriority={"name": "50"})])
+        rep = pc.Report()
+        pc.check_cma_only(rep, refs, {"entities": {("bandwidthPriority", "50"): ("MISSING", "")}})
+        nr = {"name": "NR", "site": {"site": [{"name": "Branch-1"}], "group": []}}
+        fw = {"family": "socketLan", "name": "NR :: FW", "raw": {"name": "FW", "application": {"customApp": [{"name": "A"}]}},
+              "lan_firewall": True, "network_rule": nr}
+        pc.check_features(rep, export(rules=[fw], ranges=[{"name": "AzureVDI-2", "ipRange": "169.254.169.254/32"}]), {}, None)
+        rep.leave_out.add(("siteNetworkSubnet", "Site \\ LAN \\ It's a range"))  # backslashes and a quote
+        return rep
+
+    def test_findings_feed_the_leave_out_lists(self):
+        rep = self._report()
+        self.assertIn(("bandwidthPriority", "50"), rep.leave_out)
+        self.assertIn(("globalIpRange", "AzureVDI-2"), rep.leave_out)
+        self.assertEqual(rep.skip_rules, {"NR / FW"})  # nested LAN rules use the scope script's " / " form
+        self.assertEqual(rep.exclude["global_ip_ranges_exclude"], {"AzureVDI-2"})
+
+    def test_written_command_round_trips_every_name(self):
+        import shlex
+        import subprocess
+        import tempfile
+        rep = self._report()
+        with tempfile.TemporaryDirectory() as d:
+            written = pc.write_leave_out(rep, os.path.join(d, "config_data"), d)
+            self.assertEqual(len(written), 3)
+            cmd = _read(os.path.join(d, "scope_command.sh"))
+            self.assertEqual(subprocess.run(["sh", "-n", os.path.join(d, "scope_command.sh")]).returncode, 0)
+            argv = shlex.split(" ".join(l.rstrip("\\") for l in cmd.splitlines() if not l.startswith("#")))
+            self.assertIn("siteNetworkSubnet=Site \\ LAN \\ It's a range", argv)
+            self.assertIn("bandwidthPriority=50", argv)
+            self.assertEqual(argv[argv.index("--skip-rule") + 1], "NR / FW")
+            self.assertEqual(argv[argv.index("--out") + 1], os.path.join(d, "config_data_target"))
+            tfv = _read(os.path.join(d, "exclude-0-dependencies.auto.tfvars"))
+            self.assertIn('global_ip_ranges_exclude = ["AzureVDI-2"]', tfv)
+            self.assertIn("allocated_ips_exclude = []", tfv)
+            self.assertNotIn("wifi", _read(os.path.join(d, "exclude-1-sites.auto.tfvars")))
+
+    def test_nothing_missing_still_writes_a_plain_copy_command(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            pc.write_leave_out(pc.Report(), os.path.join(d, "config_data"), d)
+            cmd = [l for l in _read(os.path.join(d, "scope_command.sh")).splitlines() if not l.startswith("#")]
+            self.assertEqual(len(cmd), 1)
+            self.assertFalse(cmd[0].endswith("\\"))
+
+
 class ScimEndpoint(unittest.TestCase):
     """The SCIM check against a local stand-in for the Cato SCIM app."""
 

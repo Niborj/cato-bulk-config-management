@@ -156,6 +156,31 @@ schema on 2026-11-24:
 | LAN Layer 7 enforcement | no | no | Per-site setting, CMA only. |
 | IdP and SCIM app configuration | no | no | Only the users and groups it provisions are visible (`userImportType: SCIM`). |
 
+## Leaving out what the target can't hold yet
+
+Every run also writes three files next to the report, built from whatever is
+still missing on that run:
+
+| File | What it is | What to do with it |
+|---|---|---|
+| `scope_command.sh` | A ready-made `scope_policies_to_target.py` command that writes `<config-dir>_target`: the export minus every rule that waits on a BLOCKER, plus the LAN firewall rules that need Layer 7. With nothing missing it writes an identical copy. | `sh preflight/scope_command.sh`, then deploy with `--config-dir config_data_target` |
+| `exclude-0-dependencies.auto.tfvars` | `global_ip_ranges_exclude` and `allocated_ips_exclude` (ranges the API firewall blocks, allocations on PoPs the target lacks) | Copy into `0-dependencies/` |
+| `exclude-1-sites.auto.tfvars` | `ipsec_sites_exclude` (IPSec sites on those PoPs) | Copy into `1-sites/` |
+
+The idea is simple: fix what you can, run the check again, and whatever is
+still missing gets left out by these files. Rerun the check after any change
+and they are rewritten to match. Missing CMA-only objects are only left out
+once a `--probe` run has proved them missing; without `--probe` they are an
+ACTION, not something to leave out.
+
+Wi-Fi passwords are never written to these files on purpose. `1-sites`
+accepts any value you give it, so a placeholder would go live as the real
+password. Put the real ones in `wifi_ssid_passkeys` yourself.
+
+Tested against greenfield_2: the generated command left out exactly the 100
+rules the check flags (98 behind BLOCKERs plus the 2 Layer 7 rules), and the
+two exclusion files matched the ones written by hand for the first run.
+
 ## Example: a reference tenant into a fresh trial tenant
 
 With `--probe`, the run found 12 blockers, 8 actions and 3 warnings, and 98 of
