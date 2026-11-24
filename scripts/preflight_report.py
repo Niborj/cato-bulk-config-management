@@ -747,7 +747,7 @@ def _inline(text):
 def render_runbook_html(phases, item_nums):
     if not phases:
         return ""
-    out = ['<section class="runbook"><div class="eyebrow">Part 2</div><h2>Running the migration</h2>'
+    out = ['<section class="runbook" id="part2"><div class="eyebrow">Part 2</div><h2>Running the migration</h2>'
            '<p>For the engineers who run the migration. Every command is set for these two accounts. Only the words in '
            'CAPITALS are yours to fill in. Steps that say <i>Before this step</i> point at the items in the action plan '
            'that belong first. Anything still missing is left out by the leave-out step and comes back later, so the '
@@ -866,8 +866,8 @@ def render_customer_html(rep, exp, meta, customer=None):
 <div class="stat ok"><div class="num">{counts['OK']}</div><div class="lbl">Already in place</div></div>
 </div></div></section>
 <p class="affects">{len(req_rules)} of {total} policy rules wait on an item required before migration{
-    f"; {other} more wait on an item to do, confirm or review" if other else ""}. Part 2 of this report is the
-step-by-step for running the migration.</p>
+    f"; {other} more wait on an item to do, confirm or review" if other else ""}.{
+    ' <a href="#part2">Part 2</a> of this report is the step-by-step for running the migration.' if meta.get("run") else ""}</p>
 <h2>Your action plan</h2>
 <p>Grouped by who acts. Tick each item as it's done, then run the check again to confirm.</p>"""]
 
