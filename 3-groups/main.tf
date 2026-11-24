@@ -65,7 +65,7 @@ locals {
         # 1-sites/vsocket_network_ranges.tf builds inside it
         (m.type == "SITE" && contains(local.placeholder_site_names, try(m.name, ""))) ||
         (m.type == "SITE_NETWORK_SUBNET" && contains(local.placeholder_site_subnet_names, try(m.name, ""))) ||
-        (m.type == "HOST" && contains(local.placeholder_site_host_keys, "${split(" \\ ", try(m.name, ""))[0]}|${element(split(" \\ ", try(m.name, "")), length(split(" \\ ", try(m.name, ""))) - 1)}"))
+        (m.type == "HOST" && contains(local.placeholder_site_host_keys, "${split(" \\ ", try(m.name, ""))[0]}|${replace(element(split(" \\ ", try(m.name, "")), length(split(" \\ ", try(m.name, ""))) - 1), "/ \\([^)]*\\)$/", "")}"))
       )
     ])
   }
